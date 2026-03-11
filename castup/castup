@@ -1,0 +1,352 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+CASTUP_VERSION="0.1.0"
+
+REPO="ivanzzeth/foundry"
+BASE_DIR=${XDG_CONFIG_HOME:-$HOME}
+FOUNDRY_DIR=${FOUNDRY_DIR:-"$BASE_DIR/.foundry"}
+FOUNDRY_VERSIONS_DIR="$FOUNDRY_DIR/versions"
+FOUNDRY_BIN_DIR="$FOUNDRY_DIR/bin"
+FOUNDRY_MAN_DIR="$FOUNDRY_DIR/share/man/man1"
+CASTUP_JOBS=""
+
+BINS=(forge cast anvil chisel)
+
+# Extra features for our fork (on top of upstream defaults).
+EXTRA_FEATURES="extra"
+
+export RUSTFLAGS="${RUSTFLAGS:--C target-cpu=native}"
+
+main() {
+  need_cmd curl
+
+  while [[ -n $1 ]]; do
+    case $1 in
+      --)               shift; break;;
+
+      -v|--version)     shift; version;;
+      -i|--install)     shift; CASTUP_TAG=$1;;
+      -l|--list)        shift; list;;
+      -u|--use)         shift; CASTUP_TAG=$1; use;;
+      -p|--path)        shift; CASTUP_LOCAL_REPO=$1;;
+      -b|--branch)      shift; CASTUP_BRANCH=$1;;
+      -j|--jobs)        shift; CASTUP_JOBS=$1;;
+      --arch)           shift; CASTUP_ARCH=$1;;
+      --platform)       shift; CASTUP_PLATFORM=$1;;
+      --source)         CASTUP_FROM_SOURCE=true;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        warn "unknown option: $1"
+        usage
+        exit 1
+    esac; shift
+  done
+
+  CARGO_BUILD_ARGS=(--release)
+
+  if [ -n "$CASTUP_JOBS" ]; then
+    CARGO_BUILD_ARGS+=(--jobs "$CASTUP_JOBS")
+  fi
+
+  banner
+
+  check_bins_in_use
+
+  # Install from local path
+  if [[ -n "$CASTUP_LOCAL_REPO" ]]; then
+    need_cmd cargo
+    say "installing from $CASTUP_LOCAL_REPO"
+    cd "$CASTUP_LOCAL_REPO"
+    ensure cargo build --bins --features "$EXTRA_FEATURES" "${CARGO_BUILD_ARGS[@]}"
+
+    for bin in "${BINS[@]}"; do
+      rm -f "$FOUNDRY_BIN_DIR/$bin"
+      ensure ln -s "$PWD/target/release/$bin" "$FOUNDRY_BIN_DIR/$bin"
+    done
+
+    say "done (linked from $CASTUP_LOCAL_REPO)"
+    exit 0
+  fi
+
+  # Build from source (clone + build)
+  if [[ "$CASTUP_FROM_SOURCE" == "true" || -n "$CASTUP_BRANCH" ]]; then
+    need_cmd cargo
+    need_cmd git
+    CASTUP_BRANCH=${CASTUP_BRANCH:-master}
+    REPO_PATH="$FOUNDRY_DIR/$REPO"
+
+    if [ ! -d "$REPO_PATH" ]; then
+      ensure mkdir -p "$FOUNDRY_DIR/ivanzzeth"
+      cd "$FOUNDRY_DIR/ivanzzeth"
+      ensure git clone "https://github.com/$REPO"
+    fi
+
+    cd "$REPO_PATH"
+    ensure git fetch origin "${CASTUP_BRANCH}:remotes/origin/${CASTUP_BRANCH}"
+    ensure git checkout "origin/${CASTUP_BRANCH}"
+
+    CASTUP_TAG=${CASTUP_TAG:-"source-${CASTUP_BRANCH}"}
+    say "building from source (branch: $CASTUP_BRANCH)"
+
+    ensure cargo build --bins --features "$EXTRA_FEATURES" "${CARGO_BUILD_ARGS[@]}"
+
+    ensure mkdir -p "$FOUNDRY_VERSIONS_DIR/$CASTUP_TAG"
+    for bin in "${BINS[@]}"; do
+      for try_path in target/release/$bin target/release/$bin.exe; do
+        if [ -f "$try_path" ]; then
+          mv -f "$try_path" "$FOUNDRY_VERSIONS_DIR/$CASTUP_TAG"
+        fi
+      done
+    done
+
+    use
+    say "done"
+    exit 0
+  fi
+
+  # Download pre-built binaries (default)
+  CASTUP_TAG=${CASTUP_TAG:-"latest"}
+
+  # Resolve "latest" to the most recent v* tag
+  if [[ "$CASTUP_TAG" == "latest" ]]; then
+    say "resolving latest release..."
+    CASTUP_TAG=$(resolve_latest_tag)
+    if [ -z "$CASTUP_TAG" ]; then
+      err "no releases found. Use --source to build from source, or push a v* tag first."
+    fi
+    say "latest release: $CASTUP_TAG"
+  fi
+
+  say "installing foundry (tag: $CASTUP_TAG)"
+
+  detect_platform_arch
+
+  RELEASE_URL="https://github.com/${REPO}/releases/download/${CASTUP_TAG}/"
+  BIN_ARCHIVE_URL="${RELEASE_URL}foundry_${CASTUP_TAG}_${PLATFORM}_${ARCHITECTURE}.tar.gz"
+
+  ensure mkdir -p "$FOUNDRY_VERSIONS_DIR"
+
+  # Check if already installed
+  version_dir="$FOUNDRY_VERSIONS_DIR/$CASTUP_TAG"
+  if [ -d "$version_dir" ]; then
+    all_exist=true
+    for bin in "${BINS[@]}"; do
+      if [ ! -x "$version_dir/$bin" ]; then
+        all_exist=false
+        break
+      fi
+    done
+    if $all_exist; then
+      say "version $CASTUP_TAG already installed, activating..."
+      use
+      say "done!"
+      exit 0
+    fi
+  fi
+
+  # Download and extract
+  say "downloading binaries for $CASTUP_TAG..."
+  tmp="$(mktemp -d 2>/dev/null)" || err "failed to create temp dir"
+  tmp_file="$tmp/foundry.tar.gz"
+
+  ensure download "$BIN_ARCHIVE_URL" "$tmp_file"
+  ensure tar tf "$tmp_file" 1> /dev/null
+  ensure mkdir -p "$FOUNDRY_VERSIONS_DIR/$CASTUP_TAG"
+  ensure tar -C "$FOUNDRY_VERSIONS_DIR/$CASTUP_TAG" -xvf "$tmp_file"
+  rm -rf "$tmp"
+
+  use
+  say "done!"
+}
+
+usage() {
+  cat 1>&2 <<EOF
+castup - Installer for Foundry (ivanzzeth fork with extra features)
+
+Includes: Cobo MPC signer, remote-signer, batch distribute/collect
+
+USAGE:
+    castup [OPTIONS]
+
+OPTIONS:
+    -h, --help        Print help information
+    -v, --version     Print castup version
+    -i, --install     Install a specific release tag (e.g. v0.1.0)
+    -l, --list        List installed versions
+    -u, --use         Switch to a specific installed version
+    -p, --path        Build and install from a local repository path
+    -b, --branch      Build from a specific branch (implies --source)
+    --source          Build from source instead of downloading binaries
+    -j, --jobs        Number of CPUs for building (default: all)
+    --arch            Override architecture (amd64, arm64)
+    --platform        Override platform (linux, darwin)
+
+EXAMPLES:
+    castup                              Install latest release
+    castup -i v0.1.0               Install specific version
+    castup --source                     Build from source (master)
+    castup -b feat/my-branch            Build from specific branch
+    castup -p ~/code/foundry            Build from local repo
+    castup -l                           List installed versions
+    castup -u v0.1.0               Switch to installed version
+EOF
+}
+
+version() {
+  say "$CASTUP_VERSION"
+  exit 0
+}
+
+list() {
+  if [ -d "$FOUNDRY_VERSIONS_DIR" ]; then
+    for VERSION in "$FOUNDRY_VERSIONS_DIR"/*; do
+      [ -d "$VERSION" ] || continue
+      say "${VERSION##*/}"
+      for bin in "${BINS[@]}"; do
+        bin_path="$VERSION/$bin"
+        if [ -x "$bin_path" ]; then
+          say "  $($bin_path -V 2>/dev/null || echo "$bin (version unknown)")"
+        fi
+      done
+      printf "\n"
+    done
+  else
+    say "no versions installed"
+  fi
+  exit 0
+}
+
+use() {
+  [ -z "$CASTUP_TAG" ] && err "no version provided"
+  FOUNDRY_VERSION_DIR="$FOUNDRY_VERSIONS_DIR/$CASTUP_TAG"
+  if [ -d "$FOUNDRY_VERSION_DIR" ]; then
+    check_bins_in_use
+    for bin in "${BINS[@]}"; do
+      bin_path="$FOUNDRY_BIN_DIR/$bin"
+      if [ -f "$FOUNDRY_VERSION_DIR/$bin" ]; then
+        cp "$FOUNDRY_VERSION_DIR/$bin" "$bin_path"
+        chmod +x "$bin_path"
+        say "  $(ensure "$bin_path" -V)"
+      fi
+
+      which_path="$(command -v "$bin" || true)"
+      if [ -n "$which_path" ] && [ "$which_path" != "$bin_path" ]; then
+        warn "another '$bin' found at $which_path — may shadow this installation"
+      fi
+    done
+  else
+    err "version $CASTUP_TAG not installed"
+  fi
+}
+
+resolve_latest_tag() {
+  # Use GitHub API to find the latest v* release
+  local api_url="https://api.github.com/repos/${REPO}/releases"
+  local response
+  response=$(curl -fsSL "$api_url" 2>/dev/null) || return 1
+  echo "$response" | grep -oP '"tag_name":\s*"\Kv[^"]+' | head -1
+}
+
+say() {
+  printf "castup: %s\n" "$1"
+}
+
+warn() {
+  say "warning: ${1}" >&2
+}
+
+err() {
+  say "$1" >&2
+  exit 1
+}
+
+tolower() {
+  echo "$1" | awk '{print tolower($0)}'
+}
+
+need_cmd() {
+  if ! command -v "$1" &>/dev/null; then
+    err "need '$1' (command not found)"
+  fi
+}
+
+check_cmd() {
+  command -v "$1" &>/dev/null
+}
+
+detect_platform_arch() {
+  uname_s=$(uname -s)
+  PLATFORM=$(tolower "${CASTUP_PLATFORM:-$uname_s}")
+  case $PLATFORM in
+    linux) ;;
+    darwin|mac*)
+      PLATFORM="darwin"
+      ;;
+    *)
+      err "unsupported platform: $PLATFORM (use --source to build from source)"
+      ;;
+  esac
+
+  uname_m=$(uname -m)
+  ARCHITECTURE=$(tolower "${CASTUP_ARCH:-$uname_m}")
+  if [ "${ARCHITECTURE}" = "x86_64" ]; then
+    if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" = "1" ]; then
+      ARCHITECTURE="arm64"
+    else
+      ARCHITECTURE="amd64"
+    fi
+  elif [ "${ARCHITECTURE}" = "arm64" ] || [ "${ARCHITECTURE}" = "aarch64" ]; then
+    ARCHITECTURE="arm64"
+  else
+    ARCHITECTURE="amd64"
+  fi
+}
+
+check_bins_in_use() {
+  if check_cmd pgrep; then
+    for bin in "${BINS[@]}"; do
+      if pgrep -x "$bin" >/dev/null 2>&1; then
+        err "'$bin' is currently running. Please stop it and try again."
+      fi
+    done
+  fi
+}
+
+ensure() {
+  if ! "$@"; then err "command failed: $*"; fi
+}
+
+download() {
+  if [ -n "$2" ]; then
+    if check_cmd curl; then
+      curl -#o "$2" -L "$1"
+    else
+      wget --show-progress -qO "$2" "$1"
+    fi
+  else
+    if check_cmd curl; then
+      curl -#L "$1"
+    else
+      wget --show-progress -qO- "$1"
+    fi
+  fi
+}
+
+banner() {
+  printf '
+.xOx.xOx.xOx.xOx.xOx.xOx.xOx.xOx.xOx.xOx.xOx.xOx.xOx.xOx.xOx.xOx.xOx.xOx
+
+ ╔═╗ ╔═╗ ╦ ╦ ╔╗╔ ╔╦╗ ╦═╗ ╦ ╦         Foundry + Extra Features
+ ╠╣  ║ ║ ║ ║ ║║║  ║║ ╠╦╝ ╚╦╝    Cobo MPC | Remote Signer | Batch Ops
+ ╚   ╚═╝ ╚═╝ ╝╚╝ ═╩╝ ╩╚═  ╩          github.com/ivanzzeth/foundry
+
+.xOx.xOx.xOx.xOx.xOx.xOx.xOx.xOx.xOx.xOx.xOx.xOx.xOx.xOx.xOx.xOx.xOx.xOx
+
+'
+}
+
+main "$@"

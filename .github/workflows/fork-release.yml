@@ -1,0 +1,173 @@
+name: Fork Release
+
+permissions: {}
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+      - "nightly"
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag name (e.g. v0.1.0)"
+        required: false
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+  IS_NIGHTLY: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag_name == '' }}
+  RUST_PROFILE: dist
+  # Upstream features + our custom "extra" feature (signer-cobo, signer-remote, batch)
+  RUST_FEATURES: aws-kms,gcp-kms,turnkey,cli,asm-keccak,js-tracer,extra
+
+jobs:
+  prepare:
+    name: Prepare release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      tag_name: ${{ steps.release_info.outputs.tag_name }}
+      release_name: ${{ steps.release_info.outputs.release_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute release name and tag
+        id: release_info
+        run: |
+          if [[ "${{ github.event.inputs.tag_name }}" != "" ]]; then
+            TAG="${{ github.event.inputs.tag_name }}"
+          elif [[ "${IS_NIGHTLY}" == "true" ]]; then
+            TAG="nightly"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          printf 'tag_name=%s\n' "$TAG" >> "$GITHUB_OUTPUT"
+
+          if [[ "$TAG" == "nightly" ]]; then
+            printf 'release_name=%s\n' "Nightly ($(date '+%Y-%m-%d'))" >> "$GITHUB_OUTPUT"
+          else
+            printf 'release_name=%s\n' "$TAG" >> "$GITHUB_OUTPUT"
+          fi
+
+  release:
+    permissions:
+      contents: write
+    name: release ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux
+            arch: amd64
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            platform: linux
+            arch: arm64
+          - runner: macos-13
+            target: x86_64-apple-darwin
+            platform: darwin
+            arch: amd64
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            platform: darwin
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install mold linker (Linux)
+        if: contains(matrix.platform, 'linux')
+        uses: rui314/setup-mold@v1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Apple M1 setup
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: |
+          printf 'SDKROOT=%s\n' "$(xcrun -sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
+          printf 'MACOSX_DEPLOYMENT_TARGET=%s\n' "$(xcrun -sdk macosx --show-sdk-platform-version)" >> "$GITHUB_ENV"
+
+      - name: Build binaries
+        env:
+          TARGET: ${{ matrix.target }}
+          TAG_NAME: ${{ needs.prepare.outputs.tag_name }}
+        run: |
+          set -eo pipefail
+          flags=(--target $TARGET --profile $RUST_PROFILE --bins
+            --no-default-features --features "$RUST_FEATURES")
+
+          # jemalloc not fully supported on aarch64 Linux
+          if [[ "$TARGET" != "aarch64-unknown-linux-gnu" ]]; then
+            flags+=(--features jemalloc)
+          fi
+
+          cargo build "${flags[@]}"
+
+          OUT_DIR="target/$TARGET/$RUST_PROFILE"
+          for name in forge cast anvil chisel; do
+            bin="$OUT_DIR/$name"
+            file "$bin" || true
+            du -h "$bin" || true
+            $bin --version || true
+          done
+
+      - name: Archive binaries
+        id: artifacts
+        env:
+          PLATFORM_NAME: ${{ matrix.platform }}
+          TARGET: ${{ matrix.target }}
+          VERSION_NAME: ${{ needs.prepare.outputs.tag_name }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          OUT_DIR="target/$TARGET/$RUST_PROFILE"
+          ARCHIVE="foundry_${VERSION_NAME}_${PLATFORM_NAME}_${ARCH}.tar.gz"
+
+          if [[ "$PLATFORM_NAME" == "darwin" ]]; then
+            gtar -czvf "$ARCHIVE" -C "$OUT_DIR" forge cast anvil chisel
+          else
+            tar -czvf "$ARCHIVE" -C "$OUT_DIR" forge cast anvil chisel
+          fi
+
+          printf "file_name=%s\n" "$ARCHIVE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          retention-days: 7
+          name: ${{ steps.artifacts.outputs.file_name }}
+          path: ${{ steps.artifacts.outputs.file_name }}
+
+      - name: Create/update release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ needs.prepare.outputs.release_name }}
+          tag_name: ${{ needs.prepare.outputs.tag_name }}
+          prerelease: ${{ contains(needs.prepare.outputs.tag_name, 'nightly') }}
+          files: ${{ steps.artifacts.outputs.file_name }}
+
+  test:
+    name: Test custom crates
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run tests
+        run: cargo test -p foundry-cobo-mpc -p foundry-remote-signer -p foundry-batch-ops

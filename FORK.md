@@ -32,6 +32,8 @@ These files have custom modifications and may conflict during sync:
 - `crates/cast/src/cmd/distribute.rs`
 - `crates/cast/src/cmd/collect.rs`
 - `scripts/sync-upstream.sh`
+- `castup/` — installer scripts (castup + install)
+- `.github/workflows/fork-release.yml` — release CI
 - `FORK.md` (this file)
 
 ## Syncing with Upstream
@@ -45,6 +47,26 @@ All custom code uses `#[cfg(feature = "...")]` guards to minimize diff.
 
 ## Install
 
+### One-line installer (recommended)
+
+```bash
+curl -sSf https://raw.githubusercontent.com/ivanzzeth/foundry/HEAD/castup/install | bash
+```
+
+Then run `castup` to install the latest pre-built release:
+
+```bash
+castup                          # Install latest release
+castup -i v0.1.0           # Install specific version
+castup --source                 # Build from source (master)
+castup -b feat/my-branch        # Build from specific branch
+castup -p ~/code/foundry        # Build from local repo
+castup -l                       # List installed versions
+castup -u v0.1.0           # Switch to installed version
+```
+
+### From source (cargo)
+
 ```bash
 cargo install --path ./crates/cast --features extra
 ```
@@ -56,3 +78,12 @@ cargo install --git https://github.com/ivanzzeth/foundry \
   --features extra \
   --bin cast
 ```
+
+## CI/CD
+
+Release workflow: `.github/workflows/fork-release.yml`
+
+- **Trigger**: Push tags `v*.*.*` or manual dispatch
+- **Platforms**: Linux (x86_64, aarch64), macOS (x86_64, aarch64)
+- **Features**: All upstream features + `extra` (signer-cobo, signer-remote, batch)
+- **Artifacts**: `foundry_{tag}_{platform}_{arch}.tar.gz` on GitHub Releases

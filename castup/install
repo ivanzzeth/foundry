@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+echo "Installing castup..."
+
+BASE_DIR="${XDG_CONFIG_HOME:-$HOME}"
+FOUNDRY_DIR="${FOUNDRY_DIR:-"$BASE_DIR/.foundry"}"
+FOUNDRY_BIN_DIR="$FOUNDRY_DIR/bin"
+
+REPO="ivanzzeth/foundry"
+BIN_URL="https://raw.githubusercontent.com/${REPO}/HEAD/castup/castup"
+BIN_PATH="$FOUNDRY_BIN_DIR/castup"
+
+# Create the .foundry bin directory and castup binary if it doesn't exist.
+mkdir -p "$FOUNDRY_BIN_DIR"
+curl -sSf -L "$BIN_URL" -o "$BIN_PATH"
+chmod +x "$BIN_PATH"
+
+# Store the correct profile file.
+case $SHELL in
+*/zsh)
+    PROFILE="${ZDOTDIR-"$HOME"}/.zshenv"
+    PREF_SHELL=zsh
+    ;;
+*/bash)
+    PROFILE=$HOME/.bashrc
+    PREF_SHELL=bash
+    ;;
+*/fish)
+    PROFILE=$HOME/.config/fish/config.fish
+    PREF_SHELL=fish
+    ;;
+*/ash)
+    PROFILE=$HOME/.profile
+    PREF_SHELL=ash
+    ;;
+*)
+    echo "castup: could not detect shell, manually add ${FOUNDRY_BIN_DIR} to your PATH."
+    exit 1
+esac
+
+# Only add to PATH if not already there.
+if [[ ":$PATH:" != *":${FOUNDRY_BIN_DIR}:"* ]]; then
+    if [[ "$PREF_SHELL" == "fish" ]]; then
+        echo >> "$PROFILE" && echo "fish_add_path -a \"$FOUNDRY_BIN_DIR\"" >> "$PROFILE"
+    else
+        echo >> "$PROFILE" && echo "export PATH=\"\$PATH:$FOUNDRY_BIN_DIR\"" >> "$PROFILE"
+    fi
+fi
+
+# Warn MacOS users about libusb.
+if [[ "$OSTYPE" =~ ^darwin ]] && [[ ! -f /usr/local/opt/libusb/lib/libusb-1.0.0.dylib ]] && [[ ! -f /opt/homebrew/opt/libusb/lib/libusb-1.0.0.dylib ]]; then
+    echo && echo "warning: libusb not found. You may need to install it manually on MacOS via Homebrew (brew install libusb)."
+fi
+
+echo
+echo "Detected your preferred shell is $PREF_SHELL and added castup to PATH."
+echo "Run 'source $PROFILE' or start a new terminal session to use castup."
+echo "Then, simply run 'castup' to install Foundry with extra features."
