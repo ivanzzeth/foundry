@@ -83,6 +83,7 @@ impl DistributeArgs {
                     let signer = send_tx.eth.wallet.signer().await?;
                     let wallet = EthereumWallet::from(signer);
                     let provider = ProviderBuilder::<_, _, AnyNetwork>::default()
+                        .with_recommended_fillers()
                         .wallet(wallet)
                         .connect_provider(&provider);
                     distribute::distribute_native(&provider, &transfers, false).await?
@@ -102,6 +103,7 @@ impl DistributeArgs {
                     let signer = send_tx.eth.wallet.signer().await?;
                     let wallet = EthereumWallet::from(signer);
                     let provider = ProviderBuilder::<_, _, AnyNetwork>::default()
+                        .with_recommended_fillers()
                         .wallet(wallet)
                         .connect_provider(&provider);
                     distribute::distribute_erc20(&provider, token, &transfers, false).await?

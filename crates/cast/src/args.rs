@@ -760,9 +760,9 @@ pub async fn run_command(args: CastArgs) -> Result<()> {
             cmd.run().await?;
         }
         CastSubcommand::Trace(cmd) => cmd.run().await?,
-        #[cfg(feature = "batch-ops")]
+        #[cfg(feature = "batch")]
         CastSubcommand::Distribute(cmd) => cmd.run().await?,
-        #[cfg(feature = "batch-ops")]
+        #[cfg(feature = "batch")]
         CastSubcommand::Collect(cmd) => cmd.run().await?,
     };
 

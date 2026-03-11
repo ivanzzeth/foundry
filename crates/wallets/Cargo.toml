@@ -43,10 +43,10 @@ alloy-signer-gcp = { workspace = true, features = ["eip712"], optional = true }
 # turnkey
 alloy-signer-turnkey = { workspace = true, features = ["eip712"], optional = true }
 
-# cobo-mpc
+# signer-cobo
 foundry-cobo-mpc = { path = "../cobo-mpc", optional = true }
 
-# remote-signer
+# signer-remote
 foundry-remote-signer = { path = "../remote-signer", optional = true }
 
 async-trait.workspace = true
@@ -68,5 +68,6 @@ reqwest = { workspace = true, features = ["json"] }
 aws-kms = ["dep:alloy-signer-aws", "dep:aws-config"]
 gcp-kms = ["dep:alloy-signer-gcp"]
 turnkey = ["dep:alloy-signer-turnkey"]
-cobo-mpc = ["dep:foundry-cobo-mpc"]
-remote-signer = ["dep:foundry-remote-signer"]
+signer-cobo = ["dep:foundry-cobo-mpc"]
+signer-remote = ["dep:foundry-remote-signer"]
+extra = ["signer-cobo", "signer-remote"]

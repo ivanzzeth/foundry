@@ -53,10 +53,10 @@ pub enum WalletSignerError {
     #[error(transparent)]
     Ecdsa(#[from] ecdsa::Error),
     #[error("Cobo MPC signer error: {0}")]
-    #[cfg(feature = "cobo-mpc")]
+    #[cfg(feature = "signer-cobo")]
     CoboMpc(String),
     #[error("Remote signer error: {0}")]
-    #[cfg(feature = "remote-signer")]
+    #[cfg(feature = "signer-remote")]
     RemoteSigner(String),
     #[error("foundry was not built with support for {0} signer")]
     UnsupportedSigner(&'static str),

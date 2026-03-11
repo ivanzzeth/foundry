@@ -24,6 +24,7 @@ alloy-serde.workspace = true
 alloy-sol-types.workspace = true
 alloy-contract.workspace = true
 alloy-consensus.workspace = true
+alloy-dyn-abi.workspace = true
 
 eyre.workspace = true
 serde = { workspace = true, features = ["derive"] }
@@ -33,3 +34,6 @@ tracing.workspace = true
 thiserror.workspace = true
 
 csv = "1.3"
+
+[dev-dependencies]
+tempfile.workspace = true

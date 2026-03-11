@@ -27,10 +27,10 @@ use alloy_signer_gcp::{
 #[cfg(feature = "turnkey")]
 use alloy_signer_turnkey::TurnkeySigner;
 
-#[cfg(feature = "cobo-mpc")]
+#[cfg(feature = "signer-cobo")]
 use foundry_cobo_mpc::CoboMpcSigner;
 
-#[cfg(feature = "remote-signer")]
+#[cfg(feature = "signer-remote")]
 use foundry_remote_signer::RemoteHttpSigner;
 
 pub type Result<T> = std::result::Result<T, WalletSignerError>;
@@ -54,10 +54,10 @@ pub enum WalletSigner {
     #[cfg(feature = "turnkey")]
     Turnkey(TurnkeySigner),
     /// Wrapper around Cobo MPC signer.
-    #[cfg(feature = "cobo-mpc")]
+    #[cfg(feature = "signer-cobo")]
     CoboMpc(CoboMpcSigner),
     /// Wrapper around Remote HTTP signer.
-    #[cfg(feature = "remote-signer")]
+    #[cfg(feature = "signer-remote")]
     Remote(RemoteHttpSigner),
 }
 
@@ -169,7 +169,7 @@ impl WalletSigner {
         cobo_chain_id: String,
         env_str: &str,
     ) -> Result<Self> {
-        #[cfg(feature = "cobo-mpc")]
+        #[cfg(feature = "signer-cobo")]
         {
             let env: foundry_cobo_mpc::CoboEnv = env_str
                 .parse()
@@ -179,7 +179,7 @@ impl WalletSigner {
             Ok(Self::CoboMpc(signer))
         }
 
-        #[cfg(not(feature = "cobo-mpc"))]
+        #[cfg(not(feature = "signer-cobo"))]
         {
             let _ = (api_key_hex, wallet_id, address, cobo_chain_id, env_str);
             Err(WalletSignerError::cobo_mpc_unsupported())
@@ -192,17 +192,38 @@ impl WalletSigner {
         api_key_hex: &str,
         address: Address,
     ) -> Result<Self> {
-        #[cfg(feature = "remote-signer")]
+        #[cfg(feature = "signer-remote")]
         {
             let signer = RemoteHttpSigner::new(url, api_key_id, api_key_hex, address)
                 .map_err(|e| WalletSignerError::RemoteSigner(e.to_string()))?;
             Ok(Self::Remote(signer))
         }
 
-        #[cfg(not(feature = "remote-signer"))]
+        #[cfg(not(feature = "signer-remote"))]
         {
             let _ = (url, api_key_id, api_key_hex, address);
             Err(WalletSignerError::remote_signer_unsupported())
+        }
+    }
+
+    /// Returns true if this is a Cobo MPC signer.
+    #[cfg(feature = "signer-cobo")]
+    pub fn is_cobo_mpc(&self) -> bool {
+        matches!(self, Self::CoboMpc(_))
+    }
+
+    /// Returns true if this is a Cobo MPC signer (always false when feature disabled).
+    #[cfg(not(feature = "signer-cobo"))]
+    pub fn is_cobo_mpc(&self) -> bool {
+        false
+    }
+
+    /// Returns a reference to the Cobo MPC client, if this is a Cobo MPC signer.
+    #[cfg(feature = "signer-cobo")]
+    pub fn cobo_mpc_client(&self) -> Option<&foundry_cobo_mpc::CoboMpcClient> {
+        match self {
+            Self::CoboMpc(signer) => Some(signer.client()),
+            _ => None,
         }
     }
 
@@ -273,11 +294,11 @@ impl WalletSigner {
             Self::Turnkey(turnkey) => {
                 senders.insert(alloy_signer::Signer::address(turnkey));
             }
-            #[cfg(feature = "cobo-mpc")]
+            #[cfg(feature = "signer-cobo")]
             Self::CoboMpc(cobo) => {
                 senders.insert(alloy_signer::Signer::address(cobo));
             }
-            #[cfg(feature = "remote-signer")]
+            #[cfg(feature = "signer-remote")]
             Self::Remote(remote) => {
                 senders.insert(alloy_signer::Signer::address(remote));
             }
@@ -319,9 +340,9 @@ macro_rules! delegate {
             Self::Gcp($inner) => $e,
             #[cfg(feature = "turnkey")]
             Self::Turnkey($inner) => $e,
-            #[cfg(feature = "cobo-mpc")]
+            #[cfg(feature = "signer-cobo")]
             Self::CoboMpc($inner) => $e,
-            #[cfg(feature = "remote-signer")]
+            #[cfg(feature = "signer-remote")]
             Self::Remote($inner) => $e,
         }
     };

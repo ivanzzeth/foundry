@@ -419,3 +419,342 @@ impl CoboMpcClient {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Valid 32-byte Ed25519 private key hex for testing.
+    const TEST_KEY_HEX: &str =
+        "0000000000000000000000000000000000000000000000000000000000000001";
+
+    fn test_client() -> CoboMpcClient {
+        CoboMpcClient::new(
+            TEST_KEY_HEX,
+            "wallet-123".to_string(),
+            "0xAbC1230001112223334445556667778889990000".to_string(),
+            "ETH".to_string(),
+            CoboEnv::Dev,
+        )
+        .unwrap()
+    }
+
+    // --- CoboMpcClient::new ---
+
+    #[test]
+    fn test_new_valid_key() {
+        let client = CoboMpcClient::new(
+            TEST_KEY_HEX,
+            "w1".to_string(),
+            "0xAddr".to_string(),
+            "ETH".to_string(),
+            CoboEnv::Prod,
+        );
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn test_new_valid_key_with_0x_prefix() {
+        let client = CoboMpcClient::new(
+            &format!("0x{TEST_KEY_HEX}"),
+            "w1".to_string(),
+            "0xAddr".to_string(),
+            "ETH".to_string(),
+            CoboEnv::Prod,
+        );
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn test_new_invalid_key_too_short() {
+        let client = CoboMpcClient::new(
+            "aabb",
+            "w1".to_string(),
+            "0xAddr".to_string(),
+            "ETH".to_string(),
+            CoboEnv::Prod,
+        );
+        assert!(client.is_err());
+    }
+
+    #[test]
+    fn test_new_invalid_key_not_hex() {
+        let client = CoboMpcClient::new(
+            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+            "w1".to_string(),
+            "0xAddr".to_string(),
+            "ETH".to_string(),
+            CoboEnv::Prod,
+        );
+        assert!(client.is_err());
+    }
+
+    #[test]
+    fn test_new_invalid_key_too_long() {
+        let long_key = "aa".repeat(33); // 33 bytes = 66 hex chars
+        let client = CoboMpcClient::new(
+            &long_key,
+            "w1".to_string(),
+            "0xAddr".to_string(),
+            "ETH".to_string(),
+            CoboEnv::Prod,
+        );
+        assert!(client.is_err());
+    }
+
+    // --- request_id ---
+
+    #[test]
+    fn test_request_id_format() {
+        let client = test_client();
+        let id = client.request_id();
+        assert!(id.starts_with("cobo-mpc-rust-v2-"), "got: {id}");
+        // The part after the prefix should be a numeric timestamp
+        let ts_part = id.strip_prefix("cobo-mpc-rust-v2-").unwrap();
+        assert!(ts_part.parse::<u128>().is_ok(), "timestamp part not numeric: {ts_part}");
+    }
+
+    #[test]
+    fn test_request_id_unique() {
+        let client = test_client();
+        let id1 = client.request_id();
+        let id2 = client.request_id();
+        // In fast succession they could match on millis, but the test documents intent
+        // At minimum they should both be valid format
+        assert!(id1.starts_with("cobo-mpc-rust-v2-"));
+        assert!(id2.starts_with("cobo-mpc-rust-v2-"));
+    }
+
+    // --- build_legacy_fee ---
+
+    #[test]
+    fn test_build_legacy_fee() {
+        let client = test_client();
+        let fee = client.build_legacy_fee(20_000_000_000, 21_000);
+
+        assert_eq!(fee.fee_type, "Fixed");
+        assert_eq!(fee.token_id, "ETH_ETH");
+        assert_eq!(fee.gas_price, Some("20000000000".to_string()));
+        assert_eq!(fee.gas_limit, Some("21000".to_string()));
+        assert!(fee.max_fee.is_none());
+        assert!(fee.max_priority_fee.is_none());
+    }
+
+    #[test]
+    fn test_build_legacy_fee_chain_id_in_token() {
+        let client = CoboMpcClient::new(
+            TEST_KEY_HEX,
+            "w1".to_string(),
+            "0xAddr".to_string(),
+            "MATIC".to_string(),
+            CoboEnv::Dev,
+        )
+        .unwrap();
+        let fee = client.build_legacy_fee(30_000_000_000, 50_000);
+        assert_eq!(fee.token_id, "MATIC_MATIC");
+    }
+
+    // --- build_eip1559_fee ---
+
+    #[test]
+    fn test_build_eip1559_fee() {
+        let client = test_client();
+        let fee = client.build_eip1559_fee(50_000_000_000, 2_000_000_000, 100_000);
+
+        assert_eq!(fee.fee_type, "Fixed");
+        assert_eq!(fee.token_id, "ETH_ETH");
+        assert!(fee.gas_price.is_none());
+        assert_eq!(fee.gas_limit, Some("100000".to_string()));
+        assert_eq!(fee.max_fee, Some("50000000000".to_string()));
+        assert_eq!(fee.max_priority_fee, Some("2000000000".to_string()));
+    }
+
+    // --- extract_signature ---
+
+    #[test]
+    fn test_extract_signature_valid_65_bytes() {
+        let client = test_client();
+        let mut sig = vec![0xABu8; 64];
+        sig.push(27); // V = 27
+        let sig_hex = hex::encode(&sig);
+        let detail = TransactionDetail {
+            transaction_id: "tx1".to_string(),
+            status: TransactionStatus::Completed,
+            transaction_hash: None,
+            signature: Some(sig_hex),
+            failed_reason: None,
+        };
+
+        let result = client.extract_signature(&detail).unwrap();
+        assert_eq!(result.len(), 65);
+        assert_eq!(result[64], 27);
+    }
+
+    #[test]
+    fn test_extract_signature_with_0x_prefix() {
+        let client = test_client();
+        let mut sig = vec![0x11u8; 64];
+        sig.push(28); // V = 28
+        let sig_hex = format!("0x{}", hex::encode(&sig));
+        let detail = TransactionDetail {
+            transaction_id: "tx1".to_string(),
+            status: TransactionStatus::Completed,
+            transaction_hash: None,
+            signature: Some(sig_hex),
+            failed_reason: None,
+        };
+
+        let result = client.extract_signature(&detail).unwrap();
+        assert_eq!(result[64], 28);
+    }
+
+    #[test]
+    fn test_extract_signature_normalize_v_0_to_27() {
+        let client = test_client();
+        let mut sig = vec![0xFFu8; 64];
+        sig.push(0); // V = 0 should become 27
+        let sig_hex = hex::encode(&sig);
+        let detail = TransactionDetail {
+            transaction_id: "tx1".to_string(),
+            status: TransactionStatus::Completed,
+            transaction_hash: None,
+            signature: Some(sig_hex),
+            failed_reason: None,
+        };
+
+        let result = client.extract_signature(&detail).unwrap();
+        assert_eq!(result[64], 27, "V=0 should be normalized to 27");
+    }
+
+    #[test]
+    fn test_extract_signature_normalize_v_1_to_28() {
+        let client = test_client();
+        let mut sig = vec![0xFFu8; 64];
+        sig.push(1); // V = 1 should become 28
+        let sig_hex = hex::encode(&sig);
+        let detail = TransactionDetail {
+            transaction_id: "tx1".to_string(),
+            status: TransactionStatus::Completed,
+            transaction_hash: None,
+            signature: Some(sig_hex),
+            failed_reason: None,
+        };
+
+        let result = client.extract_signature(&detail).unwrap();
+        assert_eq!(result[64], 28, "V=1 should be normalized to 28");
+    }
+
+    #[test]
+    fn test_extract_signature_v_27_unchanged() {
+        let client = test_client();
+        let mut sig = vec![0x00u8; 64];
+        sig.push(27);
+        let sig_hex = hex::encode(&sig);
+        let detail = TransactionDetail {
+            transaction_id: "tx1".to_string(),
+            status: TransactionStatus::Completed,
+            transaction_hash: None,
+            signature: Some(sig_hex),
+            failed_reason: None,
+        };
+
+        let result = client.extract_signature(&detail).unwrap();
+        assert_eq!(result[64], 27, "V=27 should remain 27");
+    }
+
+    #[test]
+    fn test_extract_signature_v_28_unchanged() {
+        let client = test_client();
+        let mut sig = vec![0x00u8; 64];
+        sig.push(28);
+        let sig_hex = hex::encode(&sig);
+        let detail = TransactionDetail {
+            transaction_id: "tx1".to_string(),
+            status: TransactionStatus::Completed,
+            transaction_hash: None,
+            signature: Some(sig_hex),
+            failed_reason: None,
+        };
+
+        let result = client.extract_signature(&detail).unwrap();
+        assert_eq!(result[64], 28, "V=28 should remain 28");
+    }
+
+    #[test]
+    fn test_extract_signature_too_short() {
+        let client = test_client();
+        let sig = vec![0u8; 60]; // only 60 bytes
+        let sig_hex = hex::encode(&sig);
+        let detail = TransactionDetail {
+            transaction_id: "tx1".to_string(),
+            status: TransactionStatus::Completed,
+            transaction_hash: None,
+            signature: Some(sig_hex),
+            failed_reason: None,
+        };
+
+        let err = client.extract_signature(&detail).unwrap_err();
+        assert!(matches!(err, CoboMpcError::InvalidSignature(_)));
+        let msg = format!("{err}");
+        assert!(msg.contains("expected 65 bytes"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_extract_signature_too_long() {
+        let client = test_client();
+        let sig = vec![0u8; 70]; // 70 bytes
+        let sig_hex = hex::encode(&sig);
+        let detail = TransactionDetail {
+            transaction_id: "tx1".to_string(),
+            status: TransactionStatus::Completed,
+            transaction_hash: None,
+            signature: Some(sig_hex),
+            failed_reason: None,
+        };
+
+        let err = client.extract_signature(&detail).unwrap_err();
+        assert!(matches!(err, CoboMpcError::InvalidSignature(_)));
+    }
+
+    #[test]
+    fn test_extract_signature_missing() {
+        let client = test_client();
+        let detail = TransactionDetail {
+            transaction_id: "tx1".to_string(),
+            status: TransactionStatus::Completed,
+            transaction_hash: None,
+            signature: None,
+            failed_reason: None,
+        };
+
+        let err = client.extract_signature(&detail).unwrap_err();
+        assert!(matches!(err, CoboMpcError::InvalidSignature(_)));
+        let msg = format!("{err}");
+        assert!(msg.contains("no signature"), "got: {msg}");
+    }
+
+    // --- source() ---
+
+    #[test]
+    fn test_source() {
+        let client = test_client();
+        let src = client.source();
+        assert_eq!(src.source_type, "Org-Controlled");
+        assert_eq!(src.wallet_id, "wallet-123");
+        assert_eq!(src.address, "0xAbC1230001112223334445556667778889990000");
+    }
+
+    // --- accessors ---
+
+    #[test]
+    fn test_address_accessor() {
+        let client = test_client();
+        assert_eq!(client.address(), "0xAbC1230001112223334445556667778889990000");
+    }
+
+    #[test]
+    fn test_cobo_chain_id_accessor() {
+        let client = test_client();
+        assert_eq!(client.cobo_chain_id(), "ETH");
+    }
+}

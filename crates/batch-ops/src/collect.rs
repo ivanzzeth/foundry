@@ -23,6 +23,78 @@ const GAS_MARGIN_DEN: u64 = 5;
 /// Default gas limit for native transfers.
 const NATIVE_TRANSFER_GAS: u64 = 21000;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_gas_margin_constants() {
+        // Gas margin should be 1.2x (6/5)
+        assert_eq!(GAS_MARGIN_NUM, 6);
+        assert_eq!(GAS_MARGIN_DEN, 5);
+        // Verify the ratio
+        assert_eq!(GAS_MARGIN_NUM / GAS_MARGIN_DEN, 1);
+        // 6.0 / 5.0 = 1.2
+        assert_eq!((GAS_MARGIN_NUM as f64) / (GAS_MARGIN_DEN as f64), 1.2);
+    }
+
+    #[test]
+    fn test_native_transfer_gas() {
+        assert_eq!(NATIVE_TRANSFER_GAS, 21_000);
+    }
+
+    #[test]
+    fn test_balance_of_call_selector() {
+        // ERC20 balanceOf(address) selector is 0x70a08231
+        let call = balanceOfCall { account: Address::ZERO };
+        let encoded = call.abi_encode();
+        assert_eq!(
+            &encoded[..4],
+            &[0x70, 0xa0, 0x82, 0x31],
+            "balanceOf selector should be 0x70a08231"
+        );
+    }
+
+    #[test]
+    fn test_balance_of_call_encoding_length() {
+        let call = balanceOfCall { account: Address::ZERO };
+        let encoded = call.abi_encode();
+        // 4 bytes selector + 32 bytes address
+        assert_eq!(encoded.len(), 4 + 32);
+    }
+
+    #[test]
+    fn test_transfer_call_selector() {
+        // ERC20 transfer(address,uint256) selector is 0xa9059cbb
+        let call = transferCall {
+            to: Address::ZERO,
+            amount: U256::ZERO,
+        };
+        let encoded = call.abi_encode();
+        assert_eq!(
+            &encoded[..4],
+            &[0xa9, 0x05, 0x9c, 0xbb],
+            "transfer selector should be 0xa9059cbb"
+        );
+    }
+
+    #[test]
+    fn test_gas_cost_calculation() {
+        // Verify the gas cost formula used in sweep_native_single:
+        // gas_cost = NATIVE_TRANSFER_GAS * gas_price * GAS_MARGIN_NUM / GAS_MARGIN_DEN
+        let gas_price = 20_000_000_000u64; // 20 gwei
+        let gas_cost = U256::from(NATIVE_TRANSFER_GAS)
+            * U256::from(gas_price)
+            * U256::from(GAS_MARGIN_NUM)
+            / U256::from(GAS_MARGIN_DEN);
+
+        // 21000 * 20_000_000_000 * 6 / 5 = 21000 * 20_000_000_000 * 1.2
+        //   = 21000 * 24_000_000_000 = 504_000_000_000_000
+        let expected = U256::from(504_000_000_000_000u64);
+        assert_eq!(gas_cost, expected);
+    }
+}
+
 /// Collects native tokens from mnemonic-derived wallets to a destination.
 pub async fn collect_native_from_mnemonic<P: Provider<AnyNetwork>>(
     provider: &P,
@@ -185,6 +257,7 @@ async fn sweep_native_single<P: Provider<AnyNetwork>>(
 
     let wallet = EthereumWallet::new(signer.clone());
     let signed_provider = ProviderBuilder::<_, _, AnyNetwork>::default()
+        .with_recommended_fillers()
         .wallet(wallet)
         .connect_provider(provider);
 
@@ -265,6 +338,7 @@ async fn sweep_erc20_single<P: Provider<AnyNetwork>>(
 
     let wallet = EthereumWallet::new(signer.clone());
     let signed_provider = ProviderBuilder::<_, _, AnyNetwork>::default()
+        .with_recommended_fillers()
         .wallet(wallet)
         .connect_provider(provider);
 

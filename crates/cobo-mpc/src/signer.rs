@@ -133,3 +133,181 @@ impl TxSigner<Signature> for CoboMpcSigner {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::U256;
+
+    /// Valid 32-byte Ed25519 private key hex for testing.
+    const TEST_KEY_HEX: &str =
+        "0000000000000000000000000000000000000000000000000000000000000001";
+
+    fn test_address() -> Address {
+        "0xAbC1230001112223334445556667778889990000"
+            .parse::<Address>()
+            .unwrap()
+    }
+
+    fn test_signer() -> CoboMpcSigner {
+        CoboMpcSigner::new(
+            TEST_KEY_HEX,
+            "wallet-123".to_string(),
+            test_address(),
+            "ETH".to_string(),
+            CoboEnv::Dev,
+        )
+        .unwrap()
+    }
+
+    // --- CoboMpcSigner::new ---
+
+    #[test]
+    fn test_new_valid() {
+        let signer = CoboMpcSigner::new(
+            TEST_KEY_HEX,
+            "w1".to_string(),
+            test_address(),
+            "ETH".to_string(),
+            CoboEnv::Prod,
+        );
+        assert!(signer.is_ok());
+    }
+
+    #[test]
+    fn test_new_invalid_key() {
+        let signer = CoboMpcSigner::new(
+            "invalid",
+            "w1".to_string(),
+            test_address(),
+            "ETH".to_string(),
+            CoboEnv::Prod,
+        );
+        assert!(signer.is_err());
+    }
+
+    // --- address / chain_id / set_chain_id ---
+
+    #[test]
+    fn test_signer_address() {
+        let signer = test_signer();
+        assert_eq!(Signer::address(&signer), test_address());
+    }
+
+    #[test]
+    fn test_signer_chain_id_default_none() {
+        let signer = test_signer();
+        assert_eq!(signer.chain_id(), None);
+    }
+
+    #[test]
+    fn test_signer_set_chain_id() {
+        let mut signer = test_signer();
+        signer.set_chain_id(Some(1));
+        assert_eq!(signer.chain_id(), Some(1));
+    }
+
+    #[test]
+    fn test_signer_set_chain_id_back_to_none() {
+        let mut signer = test_signer();
+        signer.set_chain_id(Some(42));
+        assert_eq!(signer.chain_id(), Some(42));
+        signer.set_chain_id(None);
+        assert_eq!(signer.chain_id(), None);
+    }
+
+    // --- bytes_to_signature ---
+
+    #[test]
+    fn test_bytes_to_signature_v27() {
+        let mut sig = [0xAAu8; 65];
+        sig[64] = 27; // V = 27 -> parity = false (0)
+        let result = CoboMpcSigner::bytes_to_signature(&sig).unwrap();
+        let expected_r = U256::from_be_slice(&sig[..32]);
+        let expected_s = U256::from_be_slice(&sig[32..64]);
+        assert_eq!(result.r(), expected_r);
+        assert_eq!(result.s(), expected_s);
+        // V=27 means v_parity=0 (false)
+        assert!(!result.v(), "V=27 should give parity=false");
+    }
+
+    #[test]
+    fn test_bytes_to_signature_v28() {
+        let mut sig = [0xBBu8; 65];
+        sig[64] = 28; // V = 28 -> parity = true (1)
+        let result = CoboMpcSigner::bytes_to_signature(&sig).unwrap();
+        let expected_r = U256::from_be_slice(&sig[..32]);
+        let expected_s = U256::from_be_slice(&sig[32..64]);
+        assert_eq!(result.r(), expected_r);
+        assert_eq!(result.s(), expected_s);
+        // V=28 means v_parity=1 (true)
+        assert!(result.v(), "V=28 should give parity=true");
+    }
+
+    #[test]
+    fn test_bytes_to_signature_v0() {
+        let mut sig = [0xCCu8; 65];
+        sig[64] = 0; // V = 0 -> parity = false
+        let result = CoboMpcSigner::bytes_to_signature(&sig).unwrap();
+        assert!(!result.v(), "V=0 should give parity=false");
+    }
+
+    #[test]
+    fn test_bytes_to_signature_v1() {
+        let mut sig = [0xDDu8; 65];
+        sig[64] = 1; // V = 1 -> parity = true
+        let result = CoboMpcSigner::bytes_to_signature(&sig).unwrap();
+        assert!(result.v(), "V=1 should give parity=true");
+    }
+
+    #[test]
+    fn test_bytes_to_signature_r_s_extraction() {
+        let mut sig = [0u8; 65];
+        // Set r to a known value
+        sig[31] = 1; // r = 1
+        // Set s to a known value
+        sig[63] = 2; // s = 2
+        sig[64] = 27;
+        let result = CoboMpcSigner::bytes_to_signature(&sig).unwrap();
+        assert_eq!(result.r(), U256::from(1));
+        assert_eq!(result.s(), U256::from(2));
+    }
+
+    // --- TxSigner::sign_transaction ---
+
+    #[tokio::test]
+    async fn test_sign_transaction_returns_error() {
+        let signer = test_signer();
+        // Create a minimal transaction to pass to sign_transaction
+        let mut tx = alloy_consensus::TxLegacy {
+            chain_id: Some(1),
+            nonce: 0,
+            gas_price: 0,
+            gas_limit: 21000,
+            to: alloy_primitives::TxKind::Call(test_address()),
+            value: alloy_primitives::U256::ZERO,
+            input: alloy_primitives::Bytes::new(),
+        };
+
+        let result = TxSigner::sign_transaction(&signer, &mut tx).await;
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("does not support standalone transaction signing"),
+            "unexpected error: {err_msg}"
+        );
+    }
+
+    // --- client accessor ---
+
+    #[test]
+    fn test_client_accessor() {
+        let signer = test_signer();
+        let client = signer.client();
+        assert_eq!(client.cobo_chain_id(), "ETH");
+        assert_eq!(
+            client.address(),
+            &format!("{:?}", test_address())
+        );
+    }
+}

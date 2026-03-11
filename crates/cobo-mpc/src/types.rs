@@ -213,3 +213,213 @@ pub enum CoboMpcError {
     #[error("{0}")]
     Other(String),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- CoboEnv::from_str ---
+
+    #[test]
+    fn test_cobo_env_from_str_prod() {
+        assert_eq!("prod".parse::<CoboEnv>().unwrap(), CoboEnv::Prod);
+    }
+
+    #[test]
+    fn test_cobo_env_from_str_production() {
+        assert_eq!("production".parse::<CoboEnv>().unwrap(), CoboEnv::Prod);
+    }
+
+    #[test]
+    fn test_cobo_env_from_str_dev() {
+        assert_eq!("dev".parse::<CoboEnv>().unwrap(), CoboEnv::Dev);
+    }
+
+    #[test]
+    fn test_cobo_env_from_str_development() {
+        assert_eq!("development".parse::<CoboEnv>().unwrap(), CoboEnv::Dev);
+    }
+
+    #[test]
+    fn test_cobo_env_from_str_sandbox() {
+        assert_eq!("sandbox".parse::<CoboEnv>().unwrap(), CoboEnv::Dev);
+    }
+
+    #[test]
+    fn test_cobo_env_from_str_case_insensitive() {
+        assert_eq!("PROD".parse::<CoboEnv>().unwrap(), CoboEnv::Prod);
+        assert_eq!("Prod".parse::<CoboEnv>().unwrap(), CoboEnv::Prod);
+        assert_eq!("DEV".parse::<CoboEnv>().unwrap(), CoboEnv::Dev);
+        assert_eq!("Dev".parse::<CoboEnv>().unwrap(), CoboEnv::Dev);
+    }
+
+    #[test]
+    fn test_cobo_env_from_str_invalid() {
+        assert!("staging".parse::<CoboEnv>().is_err());
+        assert!("".parse::<CoboEnv>().is_err());
+        assert!("test".parse::<CoboEnv>().is_err());
+    }
+
+    // --- CoboEnv::base_url ---
+
+    #[test]
+    fn test_cobo_env_base_url_prod() {
+        assert_eq!(CoboEnv::Prod.base_url(), "https://api.cobo.com");
+    }
+
+    #[test]
+    fn test_cobo_env_base_url_dev() {
+        assert_eq!(CoboEnv::Dev.base_url(), "https://api.dev.cobo.com");
+    }
+
+    // --- TransactionStatus::is_final ---
+
+    #[test]
+    fn test_transaction_status_is_final() {
+        assert!(TransactionStatus::Completed.is_final());
+        assert!(TransactionStatus::Failed.is_final());
+        assert!(TransactionStatus::Rejected.is_final());
+    }
+
+    #[test]
+    fn test_transaction_status_is_not_final() {
+        assert!(!TransactionStatus::Submitted.is_final());
+        assert!(!TransactionStatus::PendingScreening.is_final());
+        assert!(!TransactionStatus::PendingAuthorization.is_final());
+        assert!(!TransactionStatus::PendingApproval.is_final());
+        assert!(!TransactionStatus::PendingSignature.is_final());
+        assert!(!TransactionStatus::Broadcasting.is_final());
+        assert!(!TransactionStatus::Confirming.is_final());
+        assert!(!TransactionStatus::Unknown.is_final());
+    }
+
+    // --- TransactionStatus::is_broadcast ---
+
+    #[test]
+    fn test_transaction_status_is_broadcast() {
+        assert!(TransactionStatus::Confirming.is_broadcast());
+        assert!(TransactionStatus::Completed.is_broadcast());
+    }
+
+    #[test]
+    fn test_transaction_status_is_not_broadcast() {
+        assert!(!TransactionStatus::Submitted.is_broadcast());
+        assert!(!TransactionStatus::PendingScreening.is_broadcast());
+        assert!(!TransactionStatus::PendingAuthorization.is_broadcast());
+        assert!(!TransactionStatus::PendingApproval.is_broadcast());
+        assert!(!TransactionStatus::PendingSignature.is_broadcast());
+        assert!(!TransactionStatus::Broadcasting.is_broadcast());
+        assert!(!TransactionStatus::Failed.is_broadcast());
+        assert!(!TransactionStatus::Rejected.is_broadcast());
+        assert!(!TransactionStatus::Unknown.is_broadcast());
+    }
+
+    // --- CoboApiError::Display ---
+
+    #[test]
+    fn test_cobo_api_error_display_full() {
+        let err = CoboApiError {
+            error_code: Some(12001),
+            error_message: Some("Invalid API key".to_string()),
+            error_id: Some("abc123".to_string()),
+        };
+        let display = format!("{err}");
+        assert!(display.contains("12001"));
+        assert!(display.contains("Invalid API key"));
+    }
+
+    #[test]
+    fn test_cobo_api_error_display_defaults() {
+        let err = CoboApiError {
+            error_code: None,
+            error_message: None,
+            error_id: None,
+        };
+        let display = format!("{err}");
+        assert!(display.contains("0"));
+        assert!(display.contains("unknown"));
+    }
+
+    // --- CoboMpcError::Display ---
+
+    #[test]
+    fn test_cobo_mpc_error_display_api() {
+        let api_err = CoboApiError {
+            error_code: Some(500),
+            error_message: Some("internal".to_string()),
+            error_id: None,
+        };
+        let err = CoboMpcError::Api(api_err);
+        let display = format!("{err}");
+        assert!(display.contains("Cobo API error"));
+    }
+
+    #[test]
+    fn test_cobo_mpc_error_display_transaction_failed() {
+        let err = CoboMpcError::TransactionFailed {
+            reason: "insufficient funds".to_string(),
+        };
+        let display = format!("{err}");
+        assert!(display.contains("Transaction failed"));
+        assert!(display.contains("insufficient funds"));
+    }
+
+    #[test]
+    fn test_cobo_mpc_error_display_transaction_rejected() {
+        let err = CoboMpcError::TransactionRejected;
+        let display = format!("{err}");
+        assert!(display.contains("Transaction rejected"));
+    }
+
+    #[test]
+    fn test_cobo_mpc_error_display_polling_timeout() {
+        let err = CoboMpcError::PollingTimeout { retries: 50 };
+        let display = format!("{err}");
+        assert!(display.contains("50"));
+        assert!(display.contains("timeout"));
+    }
+
+    #[test]
+    fn test_cobo_mpc_error_display_invalid_signature() {
+        let err = CoboMpcError::InvalidSignature("too short".to_string());
+        let display = format!("{err}");
+        assert!(display.contains("Invalid signature"));
+        assert!(display.contains("too short"));
+    }
+
+    #[test]
+    fn test_cobo_mpc_error_display_missing_tx_hash() {
+        let err = CoboMpcError::MissingTransactionHash;
+        let display = format!("{err}");
+        assert!(display.contains("Missing transaction hash"));
+    }
+
+    #[test]
+    fn test_cobo_mpc_error_display_other() {
+        let err = CoboMpcError::Other("custom error".to_string());
+        let display = format!("{err}");
+        assert!(display.contains("custom error"));
+    }
+
+    // --- TransactionStatus serde ---
+
+    #[test]
+    fn test_transaction_status_deserialize_known() {
+        let s: TransactionStatus = serde_json::from_str("\"Completed\"").unwrap();
+        assert_eq!(s, TransactionStatus::Completed);
+    }
+
+    #[test]
+    fn test_transaction_status_deserialize_unknown() {
+        let s: TransactionStatus = serde_json::from_str("\"SomeNewStatus\"").unwrap();
+        assert_eq!(s, TransactionStatus::Unknown);
+    }
+
+    // --- MessageSignDestType::Display ---
+
+    #[test]
+    fn test_message_sign_dest_type_display() {
+        assert_eq!(format!("{}", MessageSignDestType::EVM_EIP_191), "EVM_EIP_191");
+        assert_eq!(format!("{}", MessageSignDestType::EVM_EIP_712), "EVM_EIP_712");
+    }
+}

@@ -27,7 +27,7 @@ pub mod storage;
 pub mod trace;
 pub mod txpool;
 pub mod wallet;
-#[cfg(feature = "batch-ops")]
+#[cfg(feature = "batch")]
 pub mod distribute;
-#[cfg(feature = "batch-ops")]
+#[cfg(feature = "batch")]
 pub mod collect;

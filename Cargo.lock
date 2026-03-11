@@ -4565,6 +4565,7 @@ version = "1.6.0"
 dependencies = [
  "alloy-consensus",
  "alloy-contract",
+ "alloy-dyn-abi",
  "alloy-network",
  "alloy-primitives",
  "alloy-provider",
@@ -4577,6 +4578,7 @@ dependencies = [
  "eyre",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

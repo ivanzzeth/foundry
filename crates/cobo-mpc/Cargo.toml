@@ -35,3 +35,6 @@ hex = "0.4"
 sha2 = "0.10"
 rand = "0.8"
 base64 = "0.22"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

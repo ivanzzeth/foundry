@@ -153,6 +153,18 @@ impl RemoteSignerClient {
         self.poll_request(&initial.request_id).await
     }
 
+    /// Exposed nonce for testing.
+    #[cfg(test)]
+    pub(crate) fn test_nonce(&self) -> String {
+        self.nonce()
+    }
+
+    /// Exposed timestamp for testing.
+    #[cfg(test)]
+    pub(crate) fn test_timestamp(&self) -> i64 {
+        self.timestamp()
+    }
+
     /// Polls a sign request until it reaches a final state.
     async fn poll_request(&self, request_id: &str) -> Result<SignResponse, RemoteSignerError> {
         let path = format!("/api/v1/sign/{}", request_id);
@@ -189,5 +201,113 @@ impl RemoteSignerClient {
                 _ => continue,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A valid 32-byte hex key for testing.
+    const TEST_KEY_HEX: &str =
+        "0000000000000000000000000000000000000000000000000000000000000001";
+
+    fn make_client() -> RemoteSignerClient {
+        RemoteSignerClient::new("http://localhost:9999", "test-key-id".into(), TEST_KEY_HEX)
+            .unwrap()
+    }
+
+    // --- new() ---
+
+    #[test]
+    fn new_with_valid_key() {
+        let client = RemoteSignerClient::new(
+            "http://localhost:8080",
+            "my-key".into(),
+            TEST_KEY_HEX,
+        );
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn new_with_0x_prefixed_key() {
+        let client = RemoteSignerClient::new(
+            "http://localhost:8080",
+            "my-key".into(),
+            &format!("0x{TEST_KEY_HEX}"),
+        );
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn new_strips_trailing_slash() {
+        let client = RemoteSignerClient::new(
+            "http://localhost:8080/",
+            "my-key".into(),
+            TEST_KEY_HEX,
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "http://localhost:8080");
+    }
+
+    #[test]
+    fn new_with_invalid_key_too_short() {
+        let result = RemoteSignerClient::new(
+            "http://localhost:8080",
+            "my-key".into(),
+            "0011",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn new_with_invalid_key_not_hex() {
+        let result = RemoteSignerClient::new(
+            "http://localhost:8080",
+            "my-key".into(),
+            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+        );
+        assert!(result.is_err());
+    }
+
+    // --- nonce() ---
+
+    #[test]
+    fn nonce_returns_16_char_hex() {
+        let client = make_client();
+        let nonce = client.test_nonce();
+        assert_eq!(nonce.len(), 16, "nonce length should be 16, got {}", nonce.len());
+        assert!(
+            nonce.chars().all(|c| c.is_ascii_hexdigit()),
+            "nonce should be hex, got: {nonce}"
+        );
+    }
+
+    #[test]
+    fn nonce_is_random() {
+        let client = make_client();
+        let n1 = client.test_nonce();
+        let n2 = client.test_nonce();
+        // Extremely unlikely to collide
+        assert_ne!(n1, n2, "two consecutive nonces should differ");
+    }
+
+    // --- timestamp() ---
+
+    #[test]
+    fn timestamp_returns_reasonable_value() {
+        let client = make_client();
+        let ts = client.test_timestamp();
+        // Should be after 2024-01-01 and before 2100-01-01
+        assert!(ts > 1_704_067_200, "timestamp too small: {ts}");
+        assert!(ts < 4_102_444_800, "timestamp too large: {ts}");
+    }
+
+    #[test]
+    fn timestamp_is_monotonic() {
+        let client = make_client();
+        let t1 = client.test_timestamp();
+        let t2 = client.test_timestamp();
+        assert!(t2 >= t1, "timestamps should be monotonically non-decreasing");
     }
 }

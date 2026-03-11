@@ -94,6 +94,38 @@ pub async fn distribute_native<P: Provider<AnyNetwork>>(
     })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_transfer_call_selector() {
+        // ERC20 transfer(address,uint256) selector is 0xa9059cbb
+        let call = transferCall {
+            to: Address::ZERO,
+            amount: U256::ZERO,
+        };
+        let encoded = call.abi_encode();
+        // First 4 bytes are the function selector
+        assert_eq!(
+            &encoded[..4],
+            &[0xa9, 0x05, 0x9c, 0xbb],
+            "transfer selector should be 0xa9059cbb"
+        );
+    }
+
+    #[test]
+    fn test_transfer_call_encoding_length() {
+        let call = transferCall {
+            to: Address::ZERO,
+            amount: U256::from(1000u64),
+        };
+        let encoded = call.abi_encode();
+        // 4 bytes selector + 32 bytes address + 32 bytes uint256
+        assert_eq!(encoded.len(), 4 + 32 + 32);
+    }
+}
+
 /// Executes an ERC20 token distribute operation.
 ///
 /// Sends individual ERC20 transfer transactions to each recipient.

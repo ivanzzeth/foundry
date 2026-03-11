@@ -6,7 +6,7 @@ use crate::cmd::{
     mktx::MakeTxArgs, rpc::RpcArgs, run::RunArgs, send::SendTxArgs, storage::StorageArgs,
     trace::TraceArgs, txpool::TxPoolSubcommands, wallet::WalletSubcommands,
 };
-#[cfg(feature = "batch-ops")]
+#[cfg(feature = "batch")]
 use crate::cmd::{collect::CollectArgs, distribute::DistributeArgs};
 use alloy_ens::NameOrAddress;
 use alloy_primitives::{Address, B256, Selector, U256};
@@ -1154,14 +1154,14 @@ pub enum CastSubcommand {
     /// Distribute tokens to multiple recipients.
     ///
     /// Supports native tokens and ERC20 tokens via sequential transactions.
-    #[cfg(feature = "batch-ops")]
+    #[cfg(feature = "batch")]
     #[command(name = "distribute", visible_alias = "dist")]
     Distribute(DistributeArgs),
 
     /// Collect/sweep tokens from multiple wallets to a single destination.
     ///
     /// Derives wallets from a mnemonic and sweeps balances.
-    #[cfg(feature = "batch-ops")]
+    #[cfg(feature = "batch")]
     #[command(name = "collect", visible_alias = "sweep")]
     Collect(CollectArgs),
 }

@@ -4,9 +4,10 @@ use alloy_primitives::Address;
 use clap::{Parser, Subcommand};
 use eyre::Result;
 use foundry_batch_ops::{collect, CollectResult};
-use foundry_cli::utils::{LoadConfig, get_provider};
-
-use crate::tx::SendTxOpts;
+use foundry_cli::{
+    opts::EthereumOpts,
+    utils::{LoadConfig, get_provider},
+};
 
 /// CLI arguments for `cast collect`.
 #[derive(Debug, Parser)]
@@ -19,121 +20,110 @@ pub struct CollectArgs {
 pub enum CollectSubcommand {
     /// Collect/sweep native tokens from multiple wallets to a destination.
     #[command(name = "native")]
-    Native {
-        /// Destination address to collect funds to.
-        #[arg(long, value_name = "ADDRESS")]
-        to: Address,
-
-        /// BIP-39 mnemonic to derive sender wallets.
-        #[arg(long, value_name = "MNEMONIC", env = "MNEMONIC")]
-        mnemonic: String,
-
-        /// Optional mnemonic passphrase.
-        #[arg(long, value_name = "PASSPHRASE")]
-        mnemonic_passphrase: Option<String>,
-
-        /// Start derivation index (inclusive).
-        #[arg(long, default_value = "0")]
-        start_index: u32,
-
-        /// End derivation index (inclusive).
-        #[arg(long, default_value = "9")]
-        end_index: u32,
-
-        /// Dry run mode - simulate without sending transactions.
-        #[arg(long)]
-        dry_run: bool,
-
-        #[command(flatten)]
-        send_tx: SendTxOpts,
-    },
+    Native(CollectNativeArgs),
     /// Collect/sweep ERC20 tokens from multiple wallets to a destination.
     #[command(name = "erc20")]
-    Erc20 {
-        /// ERC20 token contract address.
-        #[arg(long, value_name = "ADDRESS")]
-        token: Address,
+    Erc20(CollectErc20Args),
+}
 
-        /// Destination address to collect funds to.
-        #[arg(long, value_name = "ADDRESS")]
-        to: Address,
+#[derive(Debug, Parser)]
+pub struct CollectNativeArgs {
+    /// Destination address to collect funds to.
+    #[arg(long, value_name = "ADDRESS")]
+    to: Address,
 
-        /// BIP-39 mnemonic to derive sender wallets.
-        #[arg(long, value_name = "MNEMONIC", env = "MNEMONIC")]
-        mnemonic: String,
+    /// BIP-39 mnemonic to derive sender wallets.
+    #[arg(id = "sweep_mnemonic", long = "sweep-mnemonic", value_name = "MNEMONIC", env = "COLLECT_MNEMONIC")]
+    sweep_mnemonic: String,
 
-        /// Optional mnemonic passphrase.
-        #[arg(long, value_name = "PASSPHRASE")]
-        mnemonic_passphrase: Option<String>,
+    /// Optional mnemonic passphrase.
+    #[arg(id = "sweep_passphrase", long = "sweep-passphrase", value_name = "PASSPHRASE")]
+    sweep_passphrase: Option<String>,
 
-        /// Start derivation index (inclusive).
-        #[arg(long, default_value = "0")]
-        start_index: u32,
+    /// Start derivation index (inclusive).
+    #[arg(long, default_value = "0")]
+    start_index: u32,
 
-        /// End derivation index (inclusive).
-        #[arg(long, default_value = "9")]
-        end_index: u32,
+    /// End derivation index (inclusive).
+    #[arg(long, default_value = "9")]
+    end_index: u32,
 
-        /// Dry run mode - simulate without sending transactions.
-        #[arg(long)]
-        dry_run: bool,
+    /// Dry run mode - simulate without sending transactions.
+    #[arg(long)]
+    dry_run: bool,
 
-        #[command(flatten)]
-        send_tx: SendTxOpts,
-    },
+    #[command(flatten)]
+    eth: EthereumOpts,
+}
+
+#[derive(Debug, Parser)]
+pub struct CollectErc20Args {
+    /// ERC20 token contract address.
+    #[arg(long, value_name = "ADDRESS")]
+    token: Address,
+
+    /// Destination address to collect funds to.
+    #[arg(long, value_name = "ADDRESS")]
+    to: Address,
+
+    /// BIP-39 mnemonic to derive sender wallets.
+    #[arg(id = "sweep_mnemonic", long = "sweep-mnemonic", value_name = "MNEMONIC", env = "COLLECT_MNEMONIC")]
+    sweep_mnemonic: String,
+
+    /// Optional mnemonic passphrase.
+    #[arg(id = "sweep_passphrase", long = "sweep-passphrase", value_name = "PASSPHRASE")]
+    sweep_passphrase: Option<String>,
+
+    /// Start derivation index (inclusive).
+    #[arg(long, default_value = "0")]
+    start_index: u32,
+
+    /// End derivation index (inclusive).
+    #[arg(long, default_value = "9")]
+    end_index: u32,
+
+    /// Dry run mode - simulate without sending transactions.
+    #[arg(long)]
+    dry_run: bool,
+
+    #[command(flatten)]
+    eth: EthereumOpts,
 }
 
 impl CollectArgs {
     pub async fn run(self) -> Result<()> {
         match self.command {
-            CollectSubcommand::Native {
-                to,
-                mnemonic,
-                mnemonic_passphrase,
-                start_index,
-                end_index,
-                dry_run,
-                send_tx,
-            } => {
-                let config = send_tx.eth.load_config()?;
+            CollectSubcommand::Native(args) => {
+                let config = args.eth.load_config()?;
                 let provider = get_provider(&config)?;
 
                 let result = collect::collect_native_from_mnemonic(
                     &provider,
-                    to,
-                    &mnemonic,
-                    mnemonic_passphrase.as_deref(),
-                    start_index,
-                    end_index,
-                    dry_run,
+                    args.to,
+                    &args.sweep_mnemonic,
+                    args.sweep_passphrase.as_deref(),
+                    args.start_index,
+                    args.end_index,
+                    args.dry_run,
                 )
                 .await?;
 
                 print_result(&result);
                 Ok(())
             }
-            CollectSubcommand::Erc20 {
-                token,
-                to,
-                mnemonic,
-                mnemonic_passphrase,
-                start_index,
-                end_index,
-                dry_run,
-                send_tx,
-            } => {
-                let config = send_tx.eth.load_config()?;
+            CollectSubcommand::Erc20(args) => {
+                let config = args.eth.load_config()?;
                 let provider = get_provider(&config)?;
 
                 let result = collect::collect_erc20_from_mnemonic(
                     &provider,
-                    token,
-                    to,
-                    &mnemonic,
-                    mnemonic_passphrase.as_deref(),
-                    start_index,
-                    end_index,
-                    dry_run,
+                    args.token,
+                    args.to,
+                    &args.sweep_mnemonic,
+                    args.sweep_passphrase.as_deref(),
+                    args.start_index,
+                    args.end_index,
+                    args.dry_run,
                 )
                 .await?;
 

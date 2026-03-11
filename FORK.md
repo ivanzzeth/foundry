@@ -7,9 +7,10 @@ with custom extensions for Cobo MPC, remote-signer, and batch operations.
 
 | Feature Flag | Crate | Description |
 |---|---|---|
-| `cobo-mpc` | `crates/cobo-mpc/` | Cobo MPC wallet signer + provider |
-| `remote-signer` | `crates/remote-signer/` | Remote HTTP signer with ACL |
-| `batch-ops` | `crates/batch-ops/` | Distribute/collect batch commands |
+| `signer-cobo` | `crates/cobo-mpc/` | Cobo MPC wallet signer + provider |
+| `signer-remote` | `crates/remote-signer/` | Remote HTTP signer with ACL |
+| `batch` | `crates/batch-ops/` | Distribute/collect batch commands |
+| `extra` | (umbrella) | Enables all three above |
 
 ## Modified Files (vs upstream)
 
@@ -45,13 +46,13 @@ All custom code uses `#[cfg(feature = "...")]` guards to minimize diff.
 ## Install
 
 ```bash
-cargo install --path ./crates/cast --features cobo-mpc,remote-signer,batch-ops
+cargo install --path ./crates/cast --features extra
 ```
 
 Or from git:
 
 ```bash
 cargo install --git https://github.com/ivanzzeth/foundry \
-  --features cobo-mpc,remote-signer,batch-ops \
+  --features extra \
   --bin cast
 ```

@@ -9,4 +9,5 @@ pub mod distribute;
 pub mod input;
 pub mod types;
 
+pub use input::parse_amount;
 pub use types::*;

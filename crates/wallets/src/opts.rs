@@ -107,7 +107,7 @@ pub struct WalletOpts {
     ///
     /// Signs messages via Cobo WaaS 2.0 API and sends transactions atomically
     /// (sign + broadcast in one step).
-    #[arg(long, help_heading = "Wallet options - remote", hide = !cfg!(feature = "cobo-mpc"))]
+    #[arg(long, help_heading = "Wallet options - remote", hide = !cfg!(feature = "signer-cobo"))]
     pub cobo: bool,
 
     /// Cobo API key (Ed25519 private key hex).
@@ -116,7 +116,7 @@ pub struct WalletOpts {
         help_heading = "Wallet options - remote",
         value_name = "KEY",
         env = "COBO_API_KEY",
-        hide = !cfg!(feature = "cobo-mpc"),
+        hide = !cfg!(feature = "signer-cobo"),
         requires = "cobo"
     )]
     pub cobo_api_key: Option<String>,
@@ -127,7 +127,7 @@ pub struct WalletOpts {
         help_heading = "Wallet options - remote",
         value_name = "WALLET_ID",
         env = "COBO_WALLET_ID",
-        hide = !cfg!(feature = "cobo-mpc"),
+        hide = !cfg!(feature = "signer-cobo"),
         requires = "cobo"
     )]
     pub cobo_wallet_id: Option<String>,
@@ -138,7 +138,7 @@ pub struct WalletOpts {
         help_heading = "Wallet options - remote",
         value_name = "ADDRESS",
         env = "COBO_ADDRESS",
-        hide = !cfg!(feature = "cobo-mpc"),
+        hide = !cfg!(feature = "signer-cobo"),
         requires = "cobo"
     )]
     pub cobo_address: Option<Address>,
@@ -149,7 +149,7 @@ pub struct WalletOpts {
         help_heading = "Wallet options - remote",
         value_name = "CHAIN_ID",
         env = "COBO_CHAIN_ID",
-        hide = !cfg!(feature = "cobo-mpc"),
+        hide = !cfg!(feature = "signer-cobo"),
         requires = "cobo"
     )]
     pub cobo_chain_id: Option<String>,
@@ -161,7 +161,7 @@ pub struct WalletOpts {
         value_name = "ENV",
         env = "COBO_ENV",
         default_value = "prod",
-        hide = !cfg!(feature = "cobo-mpc"),
+        hide = !cfg!(feature = "signer-cobo"),
         requires = "cobo"
     )]
     pub cobo_env: Option<String>,
@@ -174,7 +174,7 @@ pub struct WalletOpts {
         help_heading = "Wallet options - remote",
         value_name = "URL",
         env = "REMOTE_SIGNER_URL",
-        hide = !cfg!(feature = "remote-signer")
+        hide = !cfg!(feature = "signer-remote")
     )]
     pub remote_signer_url: Option<String>,
 
@@ -184,7 +184,7 @@ pub struct WalletOpts {
         help_heading = "Wallet options - remote",
         value_name = "KEY_ID",
         env = "REMOTE_SIGNER_API_KEY_ID",
-        hide = !cfg!(feature = "remote-signer"),
+        hide = !cfg!(feature = "signer-remote"),
         requires = "remote_signer_url"
     )]
     pub remote_signer_api_key_id: Option<String>,
@@ -195,7 +195,7 @@ pub struct WalletOpts {
         help_heading = "Wallet options - remote",
         value_name = "KEY",
         env = "REMOTE_SIGNER_API_KEY",
-        hide = !cfg!(feature = "remote-signer"),
+        hide = !cfg!(feature = "signer-remote"),
         requires = "remote_signer_url"
     )]
     pub remote_signer_api_key: Option<String>,
@@ -206,7 +206,7 @@ pub struct WalletOpts {
         help_heading = "Wallet options - remote",
         value_name = "ADDRESS",
         env = "REMOTE_SIGNER_ADDRESS",
-        hide = !cfg!(feature = "remote-signer"),
+        hide = !cfg!(feature = "signer-remote"),
         requires = "remote_signer_url"
     )]
     pub remote_signer_address: Option<Address>,
