@@ -87,6 +87,9 @@ tracing.workspace = true
 yansi.workspace = true
 evmole.workspace = true
 
+# batch-ops (feature-gated)
+foundry-batch-ops = { path = "../batch-ops", optional = true }
+
 [dev-dependencies]
 alloy-hardforks.workspace = true
 dirs.workspace = true
@@ -102,4 +105,7 @@ tracy-allocator = ["foundry-cli/tracy-allocator"]
 aws-kms = ["foundry-wallets/aws-kms"]
 gcp-kms = ["foundry-wallets/gcp-kms"]
 turnkey = ["foundry-wallets/turnkey"]
+cobo-mpc = ["foundry-wallets/cobo-mpc"]
+remote-signer = ["foundry-wallets/remote-signer"]
+batch-ops = ["dep:foundry-batch-ops"]
 isolate-by-default = ["foundry-config/isolate-by-default"]

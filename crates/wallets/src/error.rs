@@ -52,6 +52,12 @@ pub enum WalletSignerError {
     InvalidHex(#[from] FromHexError),
     #[error(transparent)]
     Ecdsa(#[from] ecdsa::Error),
+    #[error("Cobo MPC signer error: {0}")]
+    #[cfg(feature = "cobo-mpc")]
+    CoboMpc(String),
+    #[error("Remote signer error: {0}")]
+    #[cfg(feature = "remote-signer")]
+    RemoteSigner(String),
     #[error("foundry was not built with support for {0} signer")]
     UnsupportedSigner(&'static str),
 }
@@ -71,5 +77,13 @@ impl WalletSignerError {
 
     pub fn browser_unsupported() -> Self {
         Self::UnsupportedSigner("Browser Wallet")
+    }
+
+    pub fn cobo_mpc_unsupported() -> Self {
+        Self::UnsupportedSigner("Cobo MPC")
+    }
+
+    pub fn remote_signer_unsupported() -> Self {
+        Self::UnsupportedSigner("Remote Signer")
     }
 }

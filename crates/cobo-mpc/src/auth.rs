@@ -1,0 +1,84 @@
+//! Ed25519-based authentication for Cobo WaaS 2.0 API.
+//!
+//! Cobo uses Ed25519 signatures for API authentication.
+//! The signature format is: `{method}|{path}|{timestamp}|{params}|{body}`
+
+use ed25519_dalek::{Signer, SigningKey};
+use sha2::{Digest, Sha256};
+
+/// Generates the authentication headers for a Cobo API request.
+///
+/// Returns (api_key, timestamp, nonce, signature) tuple.
+pub fn sign_request(
+    signing_key: &SigningKey,
+    method: &str,
+    path: &str,
+    timestamp: i64,
+    nonce: &str,
+    body: &str,
+) -> String {
+    let body_hash = hex::encode(Sha256::digest(body.as_bytes()));
+    let message = format!("{method}|{path}|{timestamp}|{nonce}|{body_hash}");
+    let signature = signing_key.sign(message.as_bytes());
+    hex::encode(signature.to_bytes())
+}
+
+/// Derives the API public key (hex) from the signing key.
+pub fn api_key_from_signing_key(signing_key: &SigningKey) -> String {
+    let verifying_key = signing_key.verifying_key();
+    hex::encode(verifying_key.to_bytes())
+}
+
+/// Parses a hex-encoded Ed25519 private key into a SigningKey.
+pub fn parse_signing_key(hex_key: &str) -> eyre::Result<SigningKey> {
+    let key_bytes = hex::decode(hex_key.strip_prefix("0x").unwrap_or(hex_key))?;
+    if key_bytes.len() != 32 {
+        return Err(eyre::eyre!(
+            "Invalid Ed25519 private key length: expected 32 bytes, got {}",
+            key_bytes.len()
+        ));
+    }
+    let mut key_array = [0u8; 32];
+    key_array.copy_from_slice(&key_bytes);
+    Ok(SigningKey::from_bytes(&key_array))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_signing_key() {
+        // Generate a random key and round-trip it
+        let key = SigningKey::generate(&mut rand::thread_rng());
+        let hex_key = hex::encode(key.to_bytes());
+        let parsed = parse_signing_key(&hex_key).unwrap();
+        assert_eq!(key.to_bytes(), parsed.to_bytes());
+    }
+
+    #[test]
+    fn test_parse_signing_key_with_0x_prefix() {
+        let key = SigningKey::generate(&mut rand::thread_rng());
+        let hex_key = format!("0x{}", hex::encode(key.to_bytes()));
+        let parsed = parse_signing_key(&hex_key).unwrap();
+        assert_eq!(key.to_bytes(), parsed.to_bytes());
+    }
+
+    #[test]
+    fn test_sign_request_deterministic() {
+        let key = parse_signing_key(
+            "0x0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .unwrap();
+        let sig1 = sign_request(&key, "GET", "/v2/test", 1000, "nonce1", "");
+        let sig2 = sign_request(&key, "GET", "/v2/test", 1000, "nonce1", "");
+        assert_eq!(sig1, sig2);
+    }
+
+    #[test]
+    fn test_api_key_derivation() {
+        let key = SigningKey::generate(&mut rand::thread_rng());
+        let api_key = api_key_from_signing_key(&key);
+        assert_eq!(api_key.len(), 64); // 32 bytes hex encoded
+    }
+}

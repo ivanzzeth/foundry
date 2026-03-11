@@ -760,6 +760,10 @@ pub async fn run_command(args: CastArgs) -> Result<()> {
             cmd.run().await?;
         }
         CastSubcommand::Trace(cmd) => cmd.run().await?,
+        #[cfg(feature = "batch-ops")]
+        CastSubcommand::Distribute(cmd) => cmd.run().await?,
+        #[cfg(feature = "batch-ops")]
+        CastSubcommand::Collect(cmd) => cmd.run().await?,
     };
 
     /// Prints slice of tokens using [`format_tokens`] or [`serialize_value_as_json`] depending

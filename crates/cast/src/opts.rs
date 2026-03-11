@@ -6,6 +6,8 @@ use crate::cmd::{
     mktx::MakeTxArgs, rpc::RpcArgs, run::RunArgs, send::SendTxArgs, storage::StorageArgs,
     trace::TraceArgs, txpool::TxPoolSubcommands, wallet::WalletSubcommands,
 };
+#[cfg(feature = "batch-ops")]
+use crate::cmd::{collect::CollectArgs, distribute::DistributeArgs};
 use alloy_ens::NameOrAddress;
 use alloy_primitives::{Address, B256, Selector, U256};
 use alloy_rpc_types::BlockId;
@@ -1148,6 +1150,20 @@ pub enum CastSubcommand {
     },
     #[command(name = "trace")]
     Trace(TraceArgs),
+
+    /// Distribute tokens to multiple recipients.
+    ///
+    /// Supports native tokens and ERC20 tokens via sequential transactions.
+    #[cfg(feature = "batch-ops")]
+    #[command(name = "distribute", visible_alias = "dist")]
+    Distribute(DistributeArgs),
+
+    /// Collect/sweep tokens from multiple wallets to a single destination.
+    ///
+    /// Derives wallets from a mnemonic and sweeps balances.
+    #[cfg(feature = "batch-ops")]
+    #[command(name = "collect", visible_alias = "sweep")]
+    Collect(CollectArgs),
 }
 
 /// CLI arguments for `cast --to-base`.

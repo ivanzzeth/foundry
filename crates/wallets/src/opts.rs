@@ -102,6 +102,114 @@ pub struct WalletOpts {
     /// See: <https://docs.turnkey.com/getting-started/quickstart>
     #[arg(long, help_heading = "Wallet options - remote", hide = !cfg!(feature = "turnkey"))]
     pub turnkey: bool,
+
+    /// Use Cobo MPC signer.
+    ///
+    /// Signs messages via Cobo WaaS 2.0 API and sends transactions atomically
+    /// (sign + broadcast in one step).
+    #[arg(long, help_heading = "Wallet options - remote", hide = !cfg!(feature = "cobo-mpc"))]
+    pub cobo: bool,
+
+    /// Cobo API key (Ed25519 private key hex).
+    #[arg(
+        long = "cobo-api-key",
+        help_heading = "Wallet options - remote",
+        value_name = "KEY",
+        env = "COBO_API_KEY",
+        hide = !cfg!(feature = "cobo-mpc"),
+        requires = "cobo"
+    )]
+    pub cobo_api_key: Option<String>,
+
+    /// Cobo MPC wallet ID.
+    #[arg(
+        long = "cobo-wallet-id",
+        help_heading = "Wallet options - remote",
+        value_name = "WALLET_ID",
+        env = "COBO_WALLET_ID",
+        hide = !cfg!(feature = "cobo-mpc"),
+        requires = "cobo"
+    )]
+    pub cobo_wallet_id: Option<String>,
+
+    /// Signing address in Cobo wallet.
+    #[arg(
+        long = "cobo-address",
+        help_heading = "Wallet options - remote",
+        value_name = "ADDRESS",
+        env = "COBO_ADDRESS",
+        hide = !cfg!(feature = "cobo-mpc"),
+        requires = "cobo"
+    )]
+    pub cobo_address: Option<Address>,
+
+    /// Cobo chain ID string (e.g. "ETH", "MATIC").
+    #[arg(
+        long = "cobo-chain-id",
+        help_heading = "Wallet options - remote",
+        value_name = "CHAIN_ID",
+        env = "COBO_CHAIN_ID",
+        hide = !cfg!(feature = "cobo-mpc"),
+        requires = "cobo"
+    )]
+    pub cobo_chain_id: Option<String>,
+
+    /// Cobo environment: prod or dev.
+    #[arg(
+        long = "cobo-env",
+        help_heading = "Wallet options - remote",
+        value_name = "ENV",
+        env = "COBO_ENV",
+        default_value = "prod",
+        hide = !cfg!(feature = "cobo-mpc"),
+        requires = "cobo"
+    )]
+    pub cobo_env: Option<String>,
+
+    /// Use a remote HTTP signer.
+    ///
+    /// Signs transactions via an external remote-signer service with ACL support.
+    #[arg(
+        long = "remote-signer-url",
+        help_heading = "Wallet options - remote",
+        value_name = "URL",
+        env = "REMOTE_SIGNER_URL",
+        hide = !cfg!(feature = "remote-signer")
+    )]
+    pub remote_signer_url: Option<String>,
+
+    /// Remote signer API key ID.
+    #[arg(
+        long = "remote-signer-api-key-id",
+        help_heading = "Wallet options - remote",
+        value_name = "KEY_ID",
+        env = "REMOTE_SIGNER_API_KEY_ID",
+        hide = !cfg!(feature = "remote-signer"),
+        requires = "remote_signer_url"
+    )]
+    pub remote_signer_api_key_id: Option<String>,
+
+    /// Remote signer API key (Ed25519 private key hex).
+    #[arg(
+        long = "remote-signer-api-key",
+        help_heading = "Wallet options - remote",
+        value_name = "KEY",
+        env = "REMOTE_SIGNER_API_KEY",
+        hide = !cfg!(feature = "remote-signer"),
+        requires = "remote_signer_url"
+    )]
+    pub remote_signer_api_key: Option<String>,
+
+    /// Remote signer address.
+    #[arg(
+        long = "remote-signer-address",
+        help_heading = "Wallet options - remote",
+        value_name = "ADDRESS",
+        env = "REMOTE_SIGNER_ADDRESS",
+        hide = !cfg!(feature = "remote-signer"),
+        requires = "remote_signer_url"
+    )]
+    pub remote_signer_address: Option<Address>,
 }
 
 impl WalletOpts {
@@ -113,7 +221,33 @@ impl WalletOpts {
                 .map_err(|_| eyre::eyre!("{key} environment variable is required for signer"))
         };
 
-        let signer = if self.ledger {
+        let signer = if self.cobo {
+            let api_key = self.cobo_api_key.as_deref().map(String::from)
+                .or_else(|| std::env::var("COBO_API_KEY").ok())
+                .ok_or_else(|| eyre::eyre!("COBO_API_KEY is required for Cobo MPC signer"))?;
+            let wallet_id = self.cobo_wallet_id.as_deref().map(String::from)
+                .or_else(|| std::env::var("COBO_WALLET_ID").ok())
+                .ok_or_else(|| eyre::eyre!("COBO_WALLET_ID is required for Cobo MPC signer"))?;
+            let address = self.cobo_address
+                .or_else(|| std::env::var("COBO_ADDRESS").ok().and_then(|s| s.parse().ok()))
+                .ok_or_else(|| eyre::eyre!("COBO_ADDRESS is required for Cobo MPC signer"))?;
+            let chain_id = self.cobo_chain_id.as_deref().map(String::from)
+                .or_else(|| std::env::var("COBO_CHAIN_ID").ok())
+                .ok_or_else(|| eyre::eyre!("COBO_CHAIN_ID is required for Cobo MPC signer"))?;
+            let env = self.cobo_env.as_deref().unwrap_or("prod");
+            WalletSigner::from_cobo_mpc(&api_key, wallet_id, address, chain_id, env)?
+        } else if let Some(ref url) = self.remote_signer_url {
+            let api_key_id = self.remote_signer_api_key_id.as_deref().map(String::from)
+                .or_else(|| std::env::var("REMOTE_SIGNER_API_KEY_ID").ok())
+                .ok_or_else(|| eyre::eyre!("REMOTE_SIGNER_API_KEY_ID is required for remote signer"))?;
+            let api_key = self.remote_signer_api_key.as_deref().map(String::from)
+                .or_else(|| std::env::var("REMOTE_SIGNER_API_KEY").ok())
+                .ok_or_else(|| eyre::eyre!("REMOTE_SIGNER_API_KEY is required for remote signer"))?;
+            let address = self.remote_signer_address
+                .or_else(|| std::env::var("REMOTE_SIGNER_ADDRESS").ok().and_then(|s| s.parse().ok()))
+                .ok_or_else(|| eyre::eyre!("REMOTE_SIGNER_ADDRESS is required for remote signer"))?;
+            WalletSigner::from_remote_signer(url, api_key_id, &api_key, address)?
+        } else if self.ledger {
             utils::create_ledger_signer(self.raw.hd_path.as_deref(), self.raw.mnemonic_index)
                 .await?
         } else if self.trezor {
@@ -175,6 +309,8 @@ flag to set your key via:
 --trezor
 --ledger
 --browser
+--cobo
+--remote-signer-url
 
 Alternatively, when using the `cast send` or `cast mktx` commands with a local node
 or RPC that has unlocked accounts, the --unlocked or --ethsign flags can be used,
@@ -244,6 +380,16 @@ mod tests {
             aws: false,
             gcp: false,
             turnkey: false,
+            cobo: false,
+            cobo_api_key: None,
+            cobo_wallet_id: None,
+            cobo_address: None,
+            cobo_chain_id: None,
+            cobo_env: None,
+            remote_signer_url: None,
+            remote_signer_api_key_id: None,
+            remote_signer_api_key: None,
+            remote_signer_address: None,
         };
         match wallet.signer().await {
             Ok(_) => {
