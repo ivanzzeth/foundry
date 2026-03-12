@@ -7,7 +7,7 @@ use alloy_network::{
     AnyNetwork, TransactionBuilder, TransactionBuilder7594, TransactionBuilder7702,
 };
 use alloy_primitives::{Address, Bytes, TxHash, TxKind, U256, hex};
-use alloy_provider::{PendingTransactionBuilder, Provider};
+use alloy_provider::{DynProvider, PendingTransactionBuilder, Provider};
 use alloy_rpc_types::{AccessList, Authorization, TransactionInputKind, TransactionRequest};
 use alloy_serde::WithOtherFields;
 use alloy_signer::Signer;
@@ -18,9 +18,12 @@ use foundry_cli::{
     opts::{CliAuthorizationList, EthereumOpts, TransactionOpts},
     utils::{self, LoadConfig, get_provider_builder, parse_function_args},
 };
+#[cfg(feature = "signer-cobo")]
+use foundry_cli::utils::get_provider;
+#[cfg(feature = "signer-cobo")]
+use foundry_cobo_mpc::CoboMpcProvider;
 use foundry_common::{
-    TransactionReceiptWithRevertReason, fmt::*, get_pretty_receipt_w_reason_attr,
-    provider::RetryProviderWithSigner, shell,
+    TransactionReceiptWithRevertReason, fmt::*, get_pretty_receipt_w_reason_attr, shell,
 };
 use foundry_config::{Chain, Config};
 use foundry_primitives::{FoundryTransactionRequest, FoundryTypedTx};
@@ -39,6 +42,20 @@ pub struct SendTxOpts {
     /// Note: uses `eth_sendTransactionSync` which may not be supported by all clients.
     #[arg(long, conflicts_with = "async")]
     pub sync: bool,
+
+    /// Dry run mode - simulate transaction flow without actual execution.
+    ///
+    /// Currently only supported for Cobo MPC signer (--cobo flag).
+    /// When enabled with Cobo MPC:
+    /// - Builds and validates the transaction locally
+    /// - Logs transaction details (to, calldata, value, gas_limit)
+    /// - Skips the actual Cobo API call
+    /// - Returns a dummy tx hash (0x000...000)
+    ///
+    /// For other signers (private key, ledger, remote-signer, etc.),
+    /// this flag has no effect - transactions will be sent normally.
+    #[arg(long, help_heading = "Transaction options")]
+    pub dry_run: bool,
 
     /// The number of confirmations until the receipt is fetched.
     #[arg(long, default_value = "1")]
@@ -709,15 +726,43 @@ async fn decode_execution_revert(data: &RawValue) -> Result<Option<String>> {
 }
 
 /// Creates a provider with wallet for signing transactions locally.
+///
+/// Returns a type-erased `DynProvider` that automatically handles different signer types:
+/// - For Cobo MPC: Uses `CoboMpcProvider` which routes transactions through Cobo API
+/// - For other signers: Uses standard `EthereumWallet` sign→broadcast flow
 pub(crate) async fn get_provider_with_wallet(
     tx_opts: &SendTxOpts,
-) -> eyre::Result<RetryProviderWithSigner> {
+) -> eyre::Result<DynProvider<AnyNetwork>> {
     let config = tx_opts.eth.load_config()?;
     let signer = tx_opts.eth.wallet.signer().await?;
+
+    // Check if this is a Cobo MPC signer - needs special provider
+    #[cfg(feature = "signer-cobo")]
+    if signer.is_cobo_mpc() {
+        let cobo_client = signer
+            .cobo_mpc_client()
+            .expect("is_cobo_mpc() returned true but client is None")
+            .clone();
+
+        // Create base provider (without wallet) for CoboMpcProvider
+        let base_provider = get_provider(&config)?;
+        if let Some(interval) = tx_opts.poll_interval {
+            base_provider
+                .client()
+                .set_poll_interval(Duration::from_secs(interval))
+        }
+
+        // Wrap with CoboMpcProvider and erase type
+        let cobo_provider = CoboMpcProvider::new(base_provider, cobo_client)
+            .with_dry_run(tx_opts.dry_run);
+        return Ok(cobo_provider.erased());
+    }
+
+    // Standard wallet flow
     let wallet = alloy_network::EthereumWallet::from(signer);
     let provider = get_provider_builder(&config)?.build_with_wallet(wallet)?;
     if let Some(interval) = tx_opts.poll_interval {
         provider.client().set_poll_interval(Duration::from_secs(interval))
     }
-    Ok(provider)
+    Ok(provider.erased())
 }

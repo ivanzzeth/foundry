@@ -47,23 +47,20 @@ impl RemoteSignerClient {
         })
     }
 
-    /// Generates a nonce for API requests.
-    fn nonce(&self) -> String {
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
-        let nonce: u64 = rng.r#gen();
-        format!("{nonce:016x}")
-    }
-
-    /// Returns the current timestamp in seconds.
-    fn timestamp(&self) -> i64 {
+    /// Returns the current timestamp in milliseconds (matches Go reference).
+    fn timestamp_ms(&self) -> i64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs() as i64
+            .as_millis() as i64
     }
 
     /// Makes an authenticated request to the remote signer.
+    ///
+    /// Authentication uses Ed25519 signatures matching the Go reference implementation:
+    /// - Timestamp in milliseconds
+    /// - Signature format: `{timestamp_ms}|{method}|{path}|{sha256(body)}`
+    /// - Signature is base64 encoded
     async fn request<T: serde::Serialize, R: serde::de::DeserializeOwned>(
         &self,
         method: &str,
@@ -76,14 +73,12 @@ impl RemoteSignerClient {
             Vec::new()
         };
 
-        let timestamp = self.timestamp();
-        let nonce = self.nonce();
+        let timestamp_ms = self.timestamp_ms();
         let signature = sign_request(
             &self.signing_key,
             method,
             path,
-            timestamp,
-            &nonce,
+            timestamp_ms,
             &body_bytes,
         );
 
@@ -96,12 +91,13 @@ impl RemoteSignerClient {
             _ => return Err(RemoteSignerError::Other(format!("Unsupported method: {method}"))),
         };
 
+        // Headers match Go reference: X-API-Key-ID, X-Timestamp, X-Signature
+        // No X-Nonce header (server doesn't use it)
         req = req
             .header("Content-Type", "application/json")
             .header("X-API-Key-ID", &self.api_key_id)
-            .header("X-Timestamp", timestamp.to_string())
-            .header("X-Signature", &signature)
-            .header("X-Nonce", &nonce);
+            .header("X-Timestamp", timestamp_ms.to_string())
+            .header("X-Signature", &signature);
 
         if !body_bytes.is_empty() {
             req = req.body(body_bytes);
@@ -126,12 +122,12 @@ impl RemoteSignerClient {
 
     /// Health check.
     pub async fn health(&self) -> Result<HealthResponse, RemoteSignerError> {
-        self.request::<(), HealthResponse>("GET", "/api/v1/health", None).await
+        self.request::<(), HealthResponse>("GET", "/health", None).await
     }
 
     /// Submits a sign request and polls until completion.
     pub async fn sign(&self, req: &SignRequest) -> Result<SignResponse, RemoteSignerError> {
-        let initial: SignResponse = self.request("POST", "/api/v1/sign", Some(req)).await?;
+        let initial: SignResponse = self.request("POST", "/api/v1/evm/sign", Some(req)).await?;
 
         if initial.status == RequestStatus::Completed {
             return Ok(initial);
@@ -153,21 +149,15 @@ impl RemoteSignerClient {
         self.poll_request(&initial.request_id).await
     }
 
-    /// Exposed nonce for testing.
-    #[cfg(test)]
-    pub(crate) fn test_nonce(&self) -> String {
-        self.nonce()
-    }
-
     /// Exposed timestamp for testing.
     #[cfg(test)]
-    pub(crate) fn test_timestamp(&self) -> i64 {
-        self.timestamp()
+    pub(crate) fn test_timestamp_ms(&self) -> i64 {
+        self.timestamp_ms()
     }
 
     /// Polls a sign request until it reaches a final state.
     async fn poll_request(&self, request_id: &str) -> Result<SignResponse, RemoteSignerError> {
-        let path = format!("/api/v1/sign/{}", request_id);
+        let path = format!("/api/v1/evm/requests/{}", request_id);
         let start = Instant::now();
 
         loop {
@@ -270,44 +260,22 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // --- nonce() ---
+    // --- timestamp_ms() ---
 
     #[test]
-    fn nonce_returns_16_char_hex() {
+    fn timestamp_ms_returns_reasonable_value() {
         let client = make_client();
-        let nonce = client.test_nonce();
-        assert_eq!(nonce.len(), 16, "nonce length should be 16, got {}", nonce.len());
-        assert!(
-            nonce.chars().all(|c| c.is_ascii_hexdigit()),
-            "nonce should be hex, got: {nonce}"
-        );
+        let ts = client.test_timestamp_ms();
+        // Should be after 2024-01-01 and before 2100-01-01 (in milliseconds)
+        assert!(ts > 1_704_067_200_000, "timestamp too small: {ts}");
+        assert!(ts < 4_102_444_800_000, "timestamp too large: {ts}");
     }
 
     #[test]
-    fn nonce_is_random() {
+    fn timestamp_ms_is_monotonic() {
         let client = make_client();
-        let n1 = client.test_nonce();
-        let n2 = client.test_nonce();
-        // Extremely unlikely to collide
-        assert_ne!(n1, n2, "two consecutive nonces should differ");
-    }
-
-    // --- timestamp() ---
-
-    #[test]
-    fn timestamp_returns_reasonable_value() {
-        let client = make_client();
-        let ts = client.test_timestamp();
-        // Should be after 2024-01-01 and before 2100-01-01
-        assert!(ts > 1_704_067_200, "timestamp too small: {ts}");
-        assert!(ts < 4_102_444_800, "timestamp too large: {ts}");
-    }
-
-    #[test]
-    fn timestamp_is_monotonic() {
-        let client = make_client();
-        let t1 = client.test_timestamp();
-        let t2 = client.test_timestamp();
+        let t1 = client.test_timestamp_ms();
+        let t2 = client.test_timestamp_ms();
         assert!(t2 >= t1, "timestamps should be monotonically non-decreasing");
     }
 }

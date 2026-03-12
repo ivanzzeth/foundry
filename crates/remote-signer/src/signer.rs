@@ -69,10 +69,16 @@ impl RemoteHttpSigner {
     }
 
     /// Helper to create and send a sign request.
+    ///
+    /// Payload structure depends on sign_type (matches Go SDK):
+    /// - Hash: `{ "hash": "0x..." }`
+    /// - Personal: `{ "message": "..." }`
+    /// - TypedData: `{ "typed_data": {...} }`
+    /// - Transaction: `{ "transaction": {...} }`
     async fn do_sign(
         &self,
         sign_type: SignType,
-        data: String,
+        payload: serde_json::Value,
     ) -> alloy_signer::Result<Signature> {
         let chain_id_str = self
             .chain_id
@@ -80,11 +86,10 @@ impl RemoteHttpSigner {
             .unwrap_or_else(|| "1".to_string());
 
         let req = SignRequest {
-            sign_type,
             chain_id: chain_id_str,
-            address: format!("{:?}", self.address),
-            data,
-            metadata: None,
+            signer_address: format!("{:?}", self.address),
+            sign_type,
+            payload,
         };
 
         let resp = self
@@ -100,13 +105,22 @@ impl RemoteHttpSigner {
 #[async_trait]
 impl Signer for RemoteHttpSigner {
     async fn sign_hash(&self, hash: &B256) -> alloy_signer::Result<Signature> {
-        let data = format!("0x{}", hex::encode(hash.as_slice()));
-        self.do_sign(SignType::Hash, data).await
+        // Payload: { "hash": "0x..." }
+        let payload = serde_json::json!({
+            "hash": format!("0x{}", hex::encode(hash.as_slice()))
+        });
+        self.do_sign(SignType::Hash, payload).await
     }
 
     async fn sign_message(&self, message: &[u8]) -> alloy_signer::Result<Signature> {
-        let data = format!("0x{}", hex::encode(message));
-        self.do_sign(SignType::Personal, data).await
+        // Payload: { "message": "..." } - message as string
+        // For binary data, hex encode it
+        let message_str = String::from_utf8(message.to_vec())
+            .unwrap_or_else(|_| format!("0x{}", hex::encode(message)));
+        let payload = serde_json::json!({
+            "message": message_str
+        });
+        self.do_sign(SignType::Personal, payload).await
     }
 
     fn address(&self) -> Address {
@@ -123,11 +137,15 @@ impl Signer for RemoteHttpSigner {
 
     async fn sign_dynamic_typed_data(
         &self,
-        payload: &TypedData,
+        typed_data: &TypedData,
     ) -> alloy_signer::Result<Signature> {
-        let json = serde_json::to_string(payload)
+        // Payload: { "typed_data": {...} }
+        let typed_data_value = serde_json::to_value(typed_data)
             .map_err(|e| alloy_signer::Error::other(e))?;
-        self.do_sign(SignType::TypedData, json).await
+        let payload = serde_json::json!({
+            "typed_data": typed_data_value
+        });
+        self.do_sign(SignType::TypedData, payload).await
     }
 }
 
@@ -142,10 +160,13 @@ impl TxSigner<Signature> for RemoteHttpSigner {
         tx: &mut dyn SignableTransaction<Signature>,
     ) -> alloy_signer::Result<Signature> {
         // Encode the transaction for signing
+        // Payload: { "raw_tx": "0x..." } with RLP-encoded transaction
         let mut buf = Vec::new();
         tx.encode_for_signing(&mut buf);
-        let data = format!("0x{}", hex::encode(&buf));
-        self.do_sign(SignType::Transaction, data).await
+        let payload = serde_json::json!({
+            "raw_tx": format!("0x{}", hex::encode(&buf))
+        });
+        self.do_sign(SignType::Transaction, payload).await
     }
 }
 
@@ -375,21 +396,20 @@ mod tests {
             .unwrap_or_else(|| "1".to_string());
 
         let req = SignRequest {
-            sign_type: SignType::Hash,
             chain_id: chain_id_str,
-            address: format!("{:?}", signer.address),
-            data: "0xabcdef".to_string(),
-            metadata: None,
+            signer_address: format!("{:?}", signer.address),
+            sign_type: SignType::Hash,
+            payload: serde_json::json!({"hash": "0xabcdef"}),
         };
 
         assert_eq!(req.chain_id, "10");
-        assert_eq!(req.address, format!("{:?}", TEST_ADDR));
-        assert_eq!(req.data, "0xabcdef");
-        assert!(req.metadata.is_none());
+        assert_eq!(req.signer_address, format!("{:?}", TEST_ADDR));
 
         // Verify it serializes correctly
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["sign_type"], "hash");
         assert_eq!(json["chain_id"], "10");
+        assert_eq!(json["signer_address"], format!("{:?}", TEST_ADDR));
+        assert_eq!(json["payload"]["hash"], "0xabcdef");
     }
 }

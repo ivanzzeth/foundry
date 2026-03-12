@@ -101,7 +101,9 @@ fn apply_tx_opts(
     }
 }
 
-/// Send an ERC20 transaction, handling Tempo transactions specially if needed
+/// Send an ERC20 transaction, handling Tempo transactions specially.
+///
+/// Cobo MPC is handled automatically by CoboMpcProvider in get_provider_with_wallet().
 ///
 /// TODO: Remove this temporary helper when we migrate to FoundryNetwork/FoundryTransactionRequest.
 async fn send_erc20_tx<P: Provider<AnyNetwork>>(
@@ -110,8 +112,7 @@ async fn send_erc20_tx<P: Provider<AnyNetwork>>(
     send_tx: &SendTxOpts,
     timeout: u64,
 ) -> eyre::Result<()> {
-    // Same as in SendTxArgs::run(), Tempo transactions need to be signed locally and sent as raw
-    // transactions
+    // Tempo transactions need to be signed locally and sent as raw transactions
     if tx.other.contains_key("feeToken") || tx.other.contains_key("nonceKey") {
         let signer = send_tx.eth.wallet.signer().await?;
         let mut ftx = FoundryTransactionRequest::new(tx);
@@ -143,6 +144,7 @@ async fn send_erc20_tx<P: Provider<AnyNetwork>>(
     }
 
     // Use the normal cast_send path for non-Tempo transactions
+    // This also works for remote-signer since it implements standard TxSigner trait
     cast_send(provider, tx, send_tx.cast_async, send_tx.sync, send_tx.confirmations, timeout).await
 }
 /// Interact with ERC20 tokens.

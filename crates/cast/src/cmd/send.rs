@@ -3,8 +3,6 @@ use std::{path::PathBuf, str::FromStr, time::Duration};
 use alloy_eips::Encodable2718;
 use alloy_ens::NameOrAddress;
 use alloy_network::{AnyNetwork, EthereumWallet, TransactionBuilder};
-#[cfg(feature = "signer-cobo")]
-use alloy_primitives::TxKind;
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types::TransactionRequest;
 use alloy_serde::WithOtherFields;
@@ -253,78 +251,41 @@ impl SendTxArgs {
                 return Ok(());
             }
 
-            // Cobo MPC: sign+broadcast is atomic via Cobo API
+            // Cobo MPC: use CoboMpcProvider which routes via Cobo API
             #[cfg(feature = "signer-cobo")]
             if signer.is_cobo_mpc() {
-                let cobo_client = signer.cobo_mpc_client()
-                    .expect("is_cobo_mpc() returned true but client is None");
+                use foundry_cobo_mpc::CoboMpcProvider;
+
+                let cobo_client = signer
+                    .cobo_mpc_client()
+                    .expect("is_cobo_mpc() returned true but client is None")
+                    .clone();
 
                 // Build the transaction (fills nonce, gas, etc.)
                 let (tx_request, _) = builder.build(&signer).await?;
-                let tx = tx_request.into_inner();
 
-                // Extract fields for Cobo API
-                let to_addr = match tx.to {
-                    Some(TxKind::Call(addr)) => addr,
-                    _ => return Err(eyre!("Cobo MPC requires a destination address (CREATE not supported)")),
-                };
-                let to_str = format!("{to_addr:?}");
-                let calldata = tx.input.input()
-                    .map(|b| format!("0x{}", alloy_primitives::hex::encode(b)))
-                    .unwrap_or_else(|| "0x".to_string());
-                let value = tx.value.map(|v| v.to_string());
+                // Create CoboMpcProvider and send via standard path
+                let cobo_provider = CoboMpcProvider::new(provider, cobo_client)
+                    .with_dry_run(send_tx.dry_run);
 
-                // Gas limit should be filled by builder, fall back to estimate
-                let gas_limit = if let Some(gas) = tx.gas {
-                    gas
-                } else {
-                    let estimate_tx = WithOtherFields::new(
-                        TransactionRequest::default()
-                            .from(from)
-                            .to(to_addr)
-                            .value(tx.value.unwrap_or_default()),
-                    );
-                    provider.estimate_gas(estimate_tx).await?
-                };
-
-                // Apply 30% gas margin for safety
-                let gas_limit_with_margin = gas_limit * 13 / 10;
-
-                // Build fee params
-                let fee = if let (Some(max_fee), Some(max_priority_fee)) =
-                    (tx.max_fee_per_gas, tx.max_priority_fee_per_gas)
-                {
-                    cobo_client.build_eip1559_fee(max_fee, max_priority_fee, gas_limit_with_margin)
-                } else {
-                    let gas_price = match tx.gas_price {
-                        Some(gp) => gp,
-                        None => provider.get_gas_price().await?,
-                    };
-                    cobo_client.build_legacy_fee(gas_price, gas_limit_with_margin)
-                };
-
-                // Call Cobo API (atomic sign + broadcast)
-                let tx_hash = cobo_client
-                    .call_contract(&to_str, &calldata, value.as_deref(), fee)
-                    .await
-                    .map_err(|e| eyre!("Cobo MPC call_contract failed: {e}"))?;
-
-                if send_tx.cast_async {
-                    sh_println!("{tx_hash}")?;
-                } else {
-                    let receipt = CastTxSender::new(&provider)
-                        .receipt(
-                            tx_hash,
-                            None,
-                            send_tx.confirmations,
-                            Some(timeout),
-                            false,
-                        )
+                // In dry-run mode, just send and print hash (don't wait for receipt)
+                if send_tx.dry_run {
+                    let pending = cobo_provider
+                        .send_transaction(tx_request.into_inner().into())
                         .await?;
-                    sh_println!("{receipt}")?;
+                    sh_println!("[DRY-RUN] tx_hash: {:#x}", pending.tx_hash())?;
+                    return Ok(());
                 }
 
-                return Ok(());
+                return cast_send(
+                    cobo_provider,
+                    tx_request.into_inner().into(),
+                    send_tx.cast_async,
+                    send_tx.sync,
+                    send_tx.confirmations,
+                    timeout,
+                )
+                .await;
             }
 
             let (tx_request, _) = builder.build(&signer).await?;

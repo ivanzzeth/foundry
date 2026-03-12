@@ -1,19 +1,17 @@
 use serde::{Deserialize, Serialize};
 
 /// Sign request to the remote signer service.
+/// Matches Go SDK: ChainID, SignerAddress, SignType, Payload
 #[derive(Debug, Clone, Serialize)]
 pub struct SignRequest {
-    /// The type of signing operation.
-    pub sign_type: SignType,
     /// The chain ID for the signing operation.
     pub chain_id: String,
-    /// The address of the signer.
-    pub address: String,
-    /// The data to sign (hex-encoded or JSON depending on sign_type).
-    pub data: String,
-    /// Optional metadata for the request.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<serde_json::Value>,
+    /// The address of the signer (matches Go field: signer_address).
+    pub signer_address: String,
+    /// The type of signing operation.
+    pub sign_type: SignType,
+    /// The payload to sign (JSON object, structure depends on sign_type).
+    pub payload: serde_json::Value,
 }
 
 /// Supported sign types.

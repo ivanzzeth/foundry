@@ -90,6 +90,9 @@ evmole.workspace = true
 # batch (feature-gated)
 foundry-batch-ops = { path = "../batch-ops", optional = true }
 
+# signer-cobo (feature-gated)
+foundry-cobo-mpc = { path = "../cobo-mpc", optional = true }
+
 [dev-dependencies]
 alloy-hardforks.workspace = true
 dirs.workspace = true
@@ -105,7 +108,7 @@ tracy-allocator = ["foundry-cli/tracy-allocator"]
 aws-kms = ["foundry-wallets/aws-kms"]
 gcp-kms = ["foundry-wallets/gcp-kms"]
 turnkey = ["foundry-wallets/turnkey"]
-signer-cobo = ["foundry-wallets/signer-cobo"]
+signer-cobo = ["foundry-wallets/signer-cobo", "dep:foundry-cobo-mpc"]
 signer-remote = ["foundry-wallets/signer-remote"]
 batch = ["dep:foundry-batch-ops"]
 extra = ["signer-cobo", "signer-remote", "batch"]

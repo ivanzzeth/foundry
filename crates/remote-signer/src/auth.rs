@@ -1,26 +1,32 @@
 //! Ed25519-based request signing for remote-signer API authentication.
 //!
-//! Request signing format (nonce mode):
-//! `{timestamp}|{nonce}|{method}|{path}|{sha256(body)}`
+//! Request signing format (matches Go reference and server implementation):
+//! `{timestamp_ms}|{method}|{path}|{sha256(body)}`
 //!
-//! Headers: X-API-Key-ID, X-Timestamp, X-Signature, X-Nonce
+//! Headers: X-API-Key-ID, X-Timestamp, X-Signature
+//! - Timestamp is in **milliseconds** since epoch
+//! - Signature is **base64** encoded
 
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
 
 /// Generates the authentication signature for a remote-signer API request.
+///
+/// Format: `{timestamp_ms}|{method}|{path}|{sha256(body)}`
+/// Returns base64-encoded Ed25519 signature.
 pub fn sign_request(
     signing_key: &SigningKey,
     method: &str,
     path: &str,
-    timestamp: i64,
-    nonce: &str,
+    timestamp_ms: i64,
     body: &[u8],
 ) -> String {
-    let body_hash = hex::encode(Sha256::digest(body));
-    let message = format!("{timestamp}|{nonce}|{method}|{path}|{body_hash}");
+    let body_hash = Sha256::digest(body);
+    // Use lowercase hex for body hash to match Go's %x format
+    let message = format!("{timestamp_ms}|{method}|{path}|{:x}", body_hash);
     let signature = signing_key.sign(message.as_bytes());
-    hex::encode(signature.to_bytes())
+    BASE64.encode(signature.to_bytes())
 }
 
 /// Parses a hex-encoded Ed25519 private key into a SigningKey.
@@ -55,8 +61,19 @@ mod tests {
             "0x0000000000000000000000000000000000000000000000000000000000000001",
         )
         .unwrap();
-        let sig1 = sign_request(&key, "POST", "/api/v1/sign", 1000, "nonce1", b"{}");
-        let sig2 = sign_request(&key, "POST", "/api/v1/sign", 1000, "nonce1", b"{}");
+        let sig1 = sign_request(&key, "POST", "/api/v1/evm/sign", 1000, b"{}");
+        let sig2 = sign_request(&key, "POST", "/api/v1/evm/sign", 1000, b"{}");
         assert_eq!(sig1, sig2);
+    }
+
+    #[test]
+    fn test_sign_request_is_base64() {
+        let key = parse_signing_key(
+            "0x0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .unwrap();
+        let sig = sign_request(&key, "POST", "/api/v1/evm/sign", 1000, b"{}");
+        // Should be valid base64
+        assert!(BASE64.decode(&sig).is_ok(), "signature should be valid base64");
     }
 }

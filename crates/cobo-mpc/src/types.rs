@@ -86,19 +86,16 @@ impl std::fmt::Display for MessageSignDestType {
 }
 
 /// Contract call destination for Cobo API.
+/// Matches Go SDK: NewEvmContractCallDestination(destinationType, address, calldata)
 #[derive(Debug, Clone, Serialize)]
 pub struct ContractCallDestination {
     pub destination_type: String,
-    pub account_output: AccountOutput,
-    pub calldata: String,
-    pub amount: Option<String>,
-}
-
-/// Account output for contract call.
-#[derive(Debug, Clone, Serialize)]
-pub struct AccountOutput {
+    /// Target contract address (direct field, not nested in account_output)
     pub address: String,
-    pub memo: Option<String>,
+    pub calldata: String,
+    /// Optional value for payable calls (wei as string)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
 }
 
 /// Fee configuration for contract calls.
@@ -154,6 +151,41 @@ pub struct ContractCallRequest {
     pub source: TransactionSource,
     pub destination: ContractCallDestination,
     pub fee: TransactionRequestFee,
+    pub description: Option<String>,
+}
+
+/// Transfer source for Cobo API.
+#[derive(Debug, Clone, Serialize)]
+pub struct TransferSource {
+    pub source_type: String,
+    pub wallet_id: String,
+    pub address: String,
+}
+
+/// Transfer destination for Cobo API.
+#[derive(Debug, Clone, Serialize)]
+pub struct TransferDestination {
+    pub destination_type: String,
+    pub account_output: TransferAccountOutput,
+}
+
+/// Account output for transfer.
+#[derive(Debug, Clone, Serialize)]
+pub struct TransferAccountOutput {
+    pub address: String,
+    pub amount: String,
+}
+
+/// Transfer request body for /v2/transactions/transfer API.
+#[derive(Debug, Clone, Serialize)]
+pub struct TransferRequest {
+    pub request_id: String,
+    pub source: TransferSource,
+    pub token_id: String,
+    pub destination: TransferDestination,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fee: Option<TransactionRequestFee>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
 

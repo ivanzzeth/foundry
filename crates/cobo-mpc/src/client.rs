@@ -2,7 +2,13 @@
 
 use crate::{
     auth::{api_key_from_signing_key, parse_signing_key, sign_request},
-    types::*,
+    types::{
+        CoboApiError, CoboEnv, CoboMpcError, ContractCallDestination, ContractCallRequest,
+        CreateTransactionResponse, MessageSignDestination, MessageSignRequest,
+        StructuredData, TransactionDetail, TransactionRequestFee, TransactionSource,
+        TransactionStatus, TransferAccountOutput, TransferDestination, TransferRequest,
+        TransferSource,
+    },
 };
 use ed25519_dalek::SigningKey;
 use reqwest::Client;
@@ -263,12 +269,9 @@ impl CoboMpcClient {
             source: self.source(),
             destination: ContractCallDestination {
                 destination_type: "EVM_Contract".to_string(),
-                account_output: AccountOutput {
-                    address: to.to_string(),
-                    memo: None,
-                },
+                address: to.to_string(),
                 calldata: calldata.to_string(),
-                amount: value.map(|v| v.to_string()),
+                value: value.map(|v| v.to_string()),
             },
             fee,
             description: Some("Contract call via Foundry cast".to_string()),
@@ -287,17 +290,63 @@ impl CoboMpcClient {
             .ok_or(CoboMpcError::MissingTransactionHash)
     }
 
-    /// Sends a transfer (native token) via the Cobo MPC API.
+    /// Sends a token transfer via the Cobo MPC API using `/v2/transactions/transfer`.
     ///
-    /// For simple ETH transfers without calldata.
+    /// This is the proper API for token transfers (both native and ERC20).
+    /// For native token transfers, use token_id like "ETH_ETH", "MATIC_MATIC".
+    /// Returns the transaction hash.
+    pub async fn transfer_token(
+        &self,
+        to: &str,
+        token_id: &str,
+        amount: &str,
+        fee: Option<TransactionRequestFee>,
+    ) -> Result<String, CoboMpcError> {
+        let request = TransferRequest {
+            request_id: self.request_id(),
+            source: TransferSource {
+                source_type: "Org-Controlled".to_string(),
+                wallet_id: self.wallet_id.clone(),
+                address: self.address.clone(),
+            },
+            token_id: token_id.to_string(),
+            destination: TransferDestination {
+                destination_type: "Address".to_string(),
+                account_output: TransferAccountOutput {
+                    address: to.to_string(),
+                    amount: amount.to_string(),
+                },
+            },
+            fee,
+            description: Some("Token transfer via Foundry cast".to_string()),
+        };
+
+        let resp: CreateTransactionResponse = self.post("/v2/transactions/transfer", &request).await?;
+
+        // Wait for the transaction to be broadcast (Confirming status)
+        let detail = self.wait_transaction_status(
+            &resp.transaction_id,
+            &TransactionStatus::Confirming,
+        ).await?;
+
+        detail
+            .transaction_hash
+            .ok_or(CoboMpcError::MissingTransactionHash)
+    }
+
+    /// Sends a native token transfer via the Cobo MPC API.
+    ///
+    /// Uses the `/v2/transactions/transfer` API with the native token ID.
     /// Returns the transaction hash.
     pub async fn transfer(
         &self,
         to: &str,
         amount: &str,
-        fee: TransactionRequestFee,
+        fee: Option<TransactionRequestFee>,
     ) -> Result<String, CoboMpcError> {
-        self.call_contract(to, "0x", Some(amount), fee).await
+        // Native token ID format: chain_id_chain_id (e.g., "ETH_ETH", "MATIC_MATIC")
+        let token_id = format!("{chain}_{chain}", chain = self.cobo_chain_id);
+        self.transfer_token(to, &token_id, amount, fee).await
     }
 
     /// Polls the Cobo API for transaction status until the target status is reached.
