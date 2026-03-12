@@ -107,7 +107,15 @@ jobs:
           TAG_NAME: ${{ needs.prepare.outputs.tag_name }}
         run: |
           set -eo pipefail
-          flags=(--target $TARGET --profile $RUST_PROFILE --bins
+
+          # aarch64 Linux free runner OOMs with fat LTO (dist profile),
+          # use release profile (thin LTO) instead.
+          PROFILE="$RUST_PROFILE"
+          if [[ "$TARGET" == "aarch64-unknown-linux-gnu" ]]; then
+            PROFILE="release"
+          fi
+
+          flags=(--target $TARGET --profile $PROFILE --bins
             --no-default-features --features "$RUST_FEATURES")
 
           # jemalloc not fully supported on aarch64 Linux
@@ -117,7 +125,7 @@ jobs:
 
           cargo build "${flags[@]}"
 
-          OUT_DIR="target/$TARGET/$RUST_PROFILE"
+          OUT_DIR="target/$TARGET/$PROFILE"
           for name in forge cast anvil chisel; do
             bin="$OUT_DIR/$name"
             file "$bin" || true
@@ -133,7 +141,11 @@ jobs:
           VERSION_NAME: ${{ needs.prepare.outputs.tag_name }}
           ARCH: ${{ matrix.arch }}
         run: |
-          OUT_DIR="target/$TARGET/$RUST_PROFILE"
+          PROFILE="$RUST_PROFILE"
+          if [[ "$TARGET" == "aarch64-unknown-linux-gnu" ]]; then
+            PROFILE="release"
+          fi
+          OUT_DIR="target/$TARGET/$PROFILE"
           ARCHIVE="foundry_${VERSION_NAME}_${PLATFORM_NAME}_${ARCH}.tar.gz"
 
           if [[ "$PLATFORM_NAME" == "darwin" ]]; then
