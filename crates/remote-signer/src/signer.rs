@@ -2,12 +2,13 @@
 
 use crate::client::RemoteSignerClient;
 use crate::types::*;
-use alloy_consensus::SignableTransaction;
+use alloy_consensus::{SignableTransaction, Transaction};
 use alloy_dyn_abi::TypedData;
 use alloy_network::TxSigner;
 use alloy_primitives::{Address, B256, ChainId, Signature};
 use alloy_signer::Signer;
 use async_trait::async_trait;
+use serde_json::Map;
 
 /// Remote HTTP signer that delegates all signing to a remote service.
 ///
@@ -66,6 +67,43 @@ impl RemoteHttpSigner {
         let y_parity = if v >= 27 { v - 27 != 0 } else { v != 0 };
 
         Ok(Signature::new(r, s, y_parity))
+    }
+
+    /// Builds the `transaction` JSON payload for the remote signer API (matches Go TransactionPayload).
+    fn build_transaction_payload(tx: &dyn Transaction) -> serde_json::Value {
+        let mut obj = Map::new();
+        if let Some(to_addr) = tx.to() {
+            obj.insert("to".into(), serde_json::Value::String(format!("{:?}", to_addr)));
+        }
+        obj.insert("value".into(), serde_json::Value::String(tx.value().to_string()));
+        obj.insert(
+            "data".into(),
+            serde_json::Value::String(format!("0x{}", hex::encode(tx.input().as_ref()))),
+        );
+        obj.insert("gas".into(), serde_json::Number::from(tx.gas_limit()).into());
+        obj.insert("nonce".into(), serde_json::Number::from(tx.nonce()).into());
+        let tx_type = if tx.is_dynamic_fee() {
+            "eip1559"
+        } else if tx.access_list().is_some() {
+            "eip2930"
+        } else {
+            "legacy"
+        };
+        obj.insert("txType".into(), serde_json::Value::String(tx_type.to_string()));
+        if tx_type == "legacy" || tx_type == "eip2930" {
+            let gas_price = tx.gas_price().unwrap_or(0);
+            obj.insert("gasPrice".into(), serde_json::Value::String(gas_price.to_string()));
+        } else {
+            obj.insert(
+                "gasFeeCap".into(),
+                serde_json::Value::String(tx.max_fee_per_gas().to_string()),
+            );
+            obj.insert(
+                "gasTipCap".into(),
+                serde_json::Value::String(tx.max_priority_fee_per_gas().unwrap_or(0).to_string()),
+            );
+        }
+        serde_json::Value::Object(obj)
     }
 
     /// Helper to create and send a sign request.
@@ -159,13 +197,10 @@ impl TxSigner<Signature> for RemoteHttpSigner {
         &self,
         tx: &mut dyn SignableTransaction<Signature>,
     ) -> alloy_signer::Result<Signature> {
-        // Encode the transaction for signing
-        // Payload: { "raw_tx": "0x..." } with RLP-encoded transaction
-        let mut buf = Vec::new();
-        tx.encode_for_signing(&mut buf);
-        let payload = serde_json::json!({
-            "raw_tx": format!("0x{}", hex::encode(&buf))
-        });
+        // Payload: { "transaction": { to, value, data, gas, nonce, gasPrice|gasFeeCap/gasTipCap, txType } }
+        // Matches Go remote-signer TransactionPayload so server can validate and sign.
+        let transaction = Self::build_transaction_payload(tx as &dyn Transaction);
+        let payload = serde_json::json!({ "transaction": transaction });
         self.do_sign(SignType::Transaction, payload).await
     }
 }
@@ -173,7 +208,8 @@ impl TxSigner<Signature> for RemoteHttpSigner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::address;
+    use alloy_consensus::TxLegacy;
+    use alloy_primitives::{address, bytes, TxKind};
 
     const TEST_KEY_HEX: &str =
         "0000000000000000000000000000000000000000000000000000000000000001";
@@ -411,5 +447,31 @@ mod tests {
         assert_eq!(json["chain_id"], "10");
         assert_eq!(json["signer_address"], format!("{:?}", TEST_ADDR));
         assert_eq!(json["payload"]["hash"], "0xabcdef");
+    }
+
+    // --- build_transaction_payload (transaction JSON for Go remote-signer API) ---
+
+    #[test]
+    fn build_transaction_payload_legacy() {
+        let to_addr = address!("0x742d35Cc6634C0532925a3b844Bc454e4438f44e");
+        let tx = TxLegacy {
+            chain_id: Some(1),
+            nonce: 2,
+            gas_price: 20_000_000_000,
+            gas_limit: 21000,
+            to: TxKind::Call(to_addr),
+            value: alloy_primitives::U256::from(1_000_000_000u64),
+            input: bytes!("deadbeef"),
+        };
+        let payload = RemoteHttpSigner::build_transaction_payload(&tx);
+        assert_eq!(payload["to"], format!("{:?}", to_addr));
+        assert_eq!(payload["value"], "1000000000");
+        assert_eq!(payload["data"], "0xdeadbeef");
+        assert_eq!(payload["gas"], 21000);
+        assert_eq!(payload["nonce"], 2);
+        assert_eq!(payload["txType"], "legacy");
+        assert_eq!(payload["gasPrice"], "20000000000");
+        assert!(payload.get("gasFeeCap").is_none());
+        assert!(payload.get("gasTipCap").is_none());
     }
 }
