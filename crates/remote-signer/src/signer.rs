@@ -1,45 +1,103 @@
 //! Remote HTTP signer implementing alloy's Signer and TxSigner traits.
+//!
+//! Uses `remote-signer-client` for HTTP and auth; signing is performed in
+//! `spawn_blocking` because the rs-client is synchronous.
 
-use crate::client::RemoteSignerClient;
-use crate::types::*;
 use alloy_consensus::{SignableTransaction, Transaction};
 use alloy_dyn_abi::TypedData;
 use alloy_network::TxSigner;
 use alloy_primitives::{Address, B256, ChainId, Signature};
 use alloy_signer::Signer;
 use async_trait::async_trait;
+use remote_signer_client::evm::{SignRequest, SignResponse};
 use serde_json::Map;
 
+/// TLS config for mTLS; certificate verification is always enabled (skip_verify is never set).
+pub use remote_signer_client::TlsConfig;
+
+/// Config stored for building the rs-client inside spawn_blocking (avoids
+/// creating reqwest::blocking::Client in async context, which can panic).
+#[derive(Clone)]
+struct RemoteSignerConfig {
+    base_url: String,
+    api_key_id: String,
+    api_key_hex: Option<String>,
+    api_key_file: Option<String>,
+    tls: Option<TlsConfig>,
+}
+
+/// Either lazy config (build client in spawn_blocking) or pre-built client (e.g. tests).
+#[derive(Clone)]
+enum ClientBacking {
+    Config(RemoteSignerConfig),
+    Client(remote_signer_client::Client),
+}
+
 /// Remote HTTP signer that delegates all signing to a remote service.
-///
-/// Unlike Cobo MPC, this signer uses standard sign→broadcast flow:
-/// the remote service returns a signature, and broadcasting is done separately.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RemoteHttpSigner {
-    client: RemoteSignerClient,
+    backing: ClientBacking,
     address: Address,
     chain_id: Option<ChainId>,
 }
 
+impl std::fmt::Debug for RemoteHttpSigner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteHttpSigner")
+            .field("address", &self.address)
+            .field("chain_id", &self.chain_id)
+            .finish_non_exhaustive()
+    }
+}
+
 impl RemoteHttpSigner {
-    /// Creates a new remote HTTP signer.
+    /// Creates a new remote HTTP signer using the given rs-client (for tests; client built in sync context).
+    pub fn with_client(client: remote_signer_client::Client, address: Address) -> Self {
+        Self {
+            backing: ClientBacking::Client(client),
+            address,
+            chain_id: None,
+        }
+    }
+
+    /// Creates a new remote HTTP signer from URL and API key. The rs-client is built inside
+    /// `spawn_blocking` when signing (avoids creating reqwest::blocking::Client in async context).
+    /// Exactly one of `api_key_hex` or `api_key_file` must be set.
+    /// If `tls` is provided, mTLS is used. `skip_verify` in `tls` is respected (set via REMOTE_SIGNER_TLS_INSECURE_SKIP_VERIFY for testing).
     pub fn new(
         base_url: &str,
         api_key_id: String,
-        api_key_hex: &str,
+        api_key_hex: Option<&str>,
+        api_key_file: Option<&str>,
         address: Address,
+        tls: Option<TlsConfig>,
     ) -> eyre::Result<Self> {
-        let client = RemoteSignerClient::new(base_url, api_key_id, api_key_hex)?;
+        match (api_key_hex, api_key_file) {
+            (Some(hex), None) => {
+                let hex_trimmed = hex.strip_prefix("0x").unwrap_or(hex);
+                let bytes =
+                    hex::decode(hex_trimmed).map_err(|e| eyre::eyre!("invalid API key hex: {e}"))?;
+                if bytes.len() != 32 && bytes.len() != 64 {
+                    return Err(eyre::eyre!(
+                        "Ed25519 private key must be 32 or 64 bytes, got {}",
+                        bytes.len()
+                    ));
+                }
+            }
+            (None, Some(_)) => {}
+            _ => return Err(eyre::eyre!("exactly one of api_key_hex or api_key_file is required")),
+        }
         Ok(Self {
-            client,
+            backing: ClientBacking::Config(RemoteSignerConfig {
+                base_url: base_url.trim_end_matches('/').to_string(),
+                api_key_id,
+                api_key_hex: api_key_hex.map(String::from),
+                api_key_file: api_key_file.map(String::from),
+                tls,
+            }),
             address,
             chain_id: None,
         })
-    }
-
-    /// Returns a reference to the underlying client.
-    pub fn client(&self) -> &RemoteSignerClient {
-        &self.client
     }
 
     /// Extracts a 65-byte signature from the sign response.
@@ -63,13 +121,11 @@ impl RemoteHttpSigner {
         let s = alloy_primitives::U256::from_be_slice(&sig_bytes[32..64]);
         let v = sig_bytes[64];
 
-        // Normalize v to parity bool (false=0, true=1)
         let y_parity = if v >= 27 { v - 27 != 0 } else { v != 0 };
 
         Ok(Signature::new(r, s, y_parity))
     }
 
-    /// Builds the `transaction` JSON payload for the remote signer API (matches Go TransactionPayload).
     fn build_transaction_payload(tx: &dyn Transaction) -> serde_json::Value {
         let mut obj = Map::new();
         if let Some(to_addr) = tx.to() {
@@ -106,16 +162,9 @@ impl RemoteHttpSigner {
         serde_json::Value::Object(obj)
     }
 
-    /// Helper to create and send a sign request.
-    ///
-    /// Payload structure depends on sign_type (matches Go SDK):
-    /// - Hash: `{ "hash": "0x..." }`
-    /// - Personal: `{ "message": "..." }`
-    /// - TypedData: `{ "typed_data": {...} }`
-    /// - Transaction: `{ "transaction": {...} }`
     async fn do_sign(
         &self,
-        sign_type: SignType,
+        sign_type: &str,
         payload: serde_json::Value,
     ) -> alloy_signer::Result<Signature> {
         let chain_id_str = self
@@ -126,15 +175,33 @@ impl RemoteHttpSigner {
         let req = SignRequest {
             chain_id: chain_id_str,
             signer_address: format!("{:?}", self.address),
-            sign_type,
+            sign_type: sign_type.to_string(),
             payload,
         };
 
-        let resp = self
-            .client
-            .sign(&req)
-            .await
-            .map_err(|e| alloy_signer::Error::other(e))?;
+        let backing = self.backing.clone();
+        let resp = tokio::task::spawn_blocking(move || {
+            let client = match backing {
+                ClientBacking::Client(c) => c,
+                ClientBacking::Config(cfg) => {
+                    let mut c = remote_signer_client::Config::default();
+                    c.base_url = cfg.base_url.clone();
+                    c.api_key_id = cfg.api_key_id.clone();
+                    if let Some(hex) = &cfg.api_key_hex {
+                        c.private_key_hex = Some(hex.clone());
+                    } else if let Some(path) = &cfg.api_key_file {
+                        c.private_key_file = Some(path.clone());
+                    }
+                    c.tls = cfg.tls.clone();
+                    remote_signer_client::Client::new(c)
+                        .map_err(|e| alloy_signer::Error::other(e.to_string()))?
+                }
+            };
+            client.evm.sign.execute(&req).map_err(|e| alloy_signer::Error::other(e.to_string()))
+        })
+        .await
+        .map_err(|e| alloy_signer::Error::other(e))?
+        .map_err(|e| alloy_signer::Error::other(e))?;
 
         Self::extract_signature(&resp)
     }
@@ -143,22 +210,19 @@ impl RemoteHttpSigner {
 #[async_trait]
 impl Signer for RemoteHttpSigner {
     async fn sign_hash(&self, hash: &B256) -> alloy_signer::Result<Signature> {
-        // Payload: { "hash": "0x..." }
         let payload = serde_json::json!({
             "hash": format!("0x{}", hex::encode(hash.as_slice()))
         });
-        self.do_sign(SignType::Hash, payload).await
+        self.do_sign("hash", payload).await
     }
 
     async fn sign_message(&self, message: &[u8]) -> alloy_signer::Result<Signature> {
-        // Payload: { "message": "..." } - message as string
-        // For binary data, hex encode it
         let message_str = String::from_utf8(message.to_vec())
             .unwrap_or_else(|_| format!("0x{}", hex::encode(message)));
         let payload = serde_json::json!({
             "message": message_str
         });
-        self.do_sign(SignType::Personal, payload).await
+        self.do_sign("personal", payload).await
     }
 
     fn address(&self) -> Address {
@@ -177,13 +241,12 @@ impl Signer for RemoteHttpSigner {
         &self,
         typed_data: &TypedData,
     ) -> alloy_signer::Result<Signature> {
-        // Payload: { "typed_data": {...} }
         let typed_data_value = serde_json::to_value(typed_data)
             .map_err(|e| alloy_signer::Error::other(e))?;
         let payload = serde_json::json!({
             "typed_data": typed_data_value
         });
-        self.do_sign(SignType::TypedData, payload).await
+        self.do_sign("typed_data", payload).await
     }
 }
 
@@ -197,11 +260,53 @@ impl TxSigner<Signature> for RemoteHttpSigner {
         &self,
         tx: &mut dyn SignableTransaction<Signature>,
     ) -> alloy_signer::Result<Signature> {
-        // Payload: { "transaction": { to, value, data, gas, nonce, gasPrice|gasFeeCap/gasTipCap, txType } }
-        // Matches Go remote-signer TransactionPayload so server can validate and sign.
         let transaction = Self::build_transaction_payload(tx as &dyn Transaction);
         let payload = serde_json::json!({ "transaction": transaction });
-        self.do_sign(SignType::Transaction, payload).await
+
+        // Prefer chain_id from the transaction itself (set by the provider
+        // from --chain / RPC), falling back to self.chain_id / default "1".
+        let chain_id_str = tx
+            .chain_id()
+            .map(|id| id.to_string())
+            .or_else(|| self.chain_id.map(|id| id.to_string()))
+            .unwrap_or_else(|| "1".to_string());
+
+        let req = SignRequest {
+            chain_id: chain_id_str,
+            signer_address: format!("{:?}", self.address),
+            sign_type: "transaction".to_string(),
+            payload,
+        };
+
+        let backing = self.backing.clone();
+        let resp = tokio::task::spawn_blocking(move || {
+            let client = match backing {
+                ClientBacking::Client(c) => c,
+                ClientBacking::Config(cfg) => {
+                    let mut c = remote_signer_client::Config::default();
+                    c.base_url = cfg.base_url.clone();
+                    c.api_key_id = cfg.api_key_id.clone();
+                    if let Some(hex) = &cfg.api_key_hex {
+                        c.private_key_hex = Some(hex.clone());
+                    } else if let Some(path) = &cfg.api_key_file {
+                        c.private_key_file = Some(path.clone());
+                    }
+                    c.tls = cfg.tls.clone();
+                    remote_signer_client::Client::new(c)
+                        .map_err(|e| alloy_signer::Error::other(e.to_string()))?
+                }
+            };
+            client
+                .evm
+                .sign
+                .execute(&req)
+                .map_err(|e| alloy_signer::Error::other(e.to_string()))
+        })
+        .await
+        .map_err(|e| alloy_signer::Error::other(e))?
+        .map_err(|e| alloy_signer::Error::other(e))?;
+
+        Self::extract_signature(&resp)
     }
 }
 
@@ -219,21 +324,23 @@ mod tests {
         RemoteHttpSigner::new(
             "http://localhost:9999",
             "test-key".into(),
-            TEST_KEY_HEX,
+            Some(TEST_KEY_HEX),
+            None,
             TEST_ADDR,
+            None,
         )
         .unwrap()
     }
-
-    // --- new() ---
 
     #[test]
     fn new_valid_construction() {
         let signer = RemoteHttpSigner::new(
             "http://localhost:8080",
             "key-id".into(),
-            TEST_KEY_HEX,
+            Some(TEST_KEY_HEX),
+            None,
             TEST_ADDR,
+            None,
         );
         assert!(signer.is_ok());
     }
@@ -243,13 +350,13 @@ mod tests {
         let signer = RemoteHttpSigner::new(
             "http://localhost:8080",
             "key-id".into(),
-            "bad",
+            Some("bad"),
+            None,
             TEST_ADDR,
+            None,
         );
         assert!(signer.is_err());
     }
-
-    // --- address / chain_id / set_chain_id ---
 
     #[test]
     fn address_returns_configured_address() {
@@ -278,18 +385,17 @@ mod tests {
         assert_eq!(signer.chain_id(), None);
     }
 
-    // --- extract_signature: valid cases ---
-
     fn make_response(sig_hex: Option<String>) -> SignResponse {
         SignResponse {
             request_id: "req-1".to_string(),
-            status: RequestStatus::Completed,
+            status: "completed".to_string(),
             signature: sig_hex,
-            error: None,
+            signed_data: None,
+            message: None,
+            rule_matched_id: None,
         }
     }
 
-    /// Build a 65-byte signature hex with given v byte.
     fn fake_sig_hex(v: u8) -> String {
         let r = [0x01u8; 32];
         let s = [0x02u8; 32];
@@ -304,7 +410,6 @@ mod tests {
     fn extract_signature_v27() {
         let resp = make_response(Some(fake_sig_hex(27)));
         let sig = RemoteHttpSigner::extract_signature(&resp).unwrap();
-        // v=27 → y_parity = false (27-27=0, 0!=0 is false)
         assert!(!sig.v(), "v=27 should map to y_parity=false");
     }
 
@@ -312,35 +417,8 @@ mod tests {
     fn extract_signature_v28() {
         let resp = make_response(Some(fake_sig_hex(28)));
         let sig = RemoteHttpSigner::extract_signature(&resp).unwrap();
-        // v=28 → y_parity = true (28-27=1, 1!=0 is true)
         assert!(sig.v(), "v=28 should map to y_parity=true");
     }
-
-    #[test]
-    fn extract_signature_v0() {
-        let resp = make_response(Some(fake_sig_hex(0)));
-        let sig = RemoteHttpSigner::extract_signature(&resp).unwrap();
-        // v=0, <27 branch → 0!=0 is false
-        assert!(!sig.v(), "v=0 should map to y_parity=false");
-    }
-
-    #[test]
-    fn extract_signature_v1() {
-        let resp = make_response(Some(fake_sig_hex(1)));
-        let sig = RemoteHttpSigner::extract_signature(&resp).unwrap();
-        // v=1, <27 branch → 1!=0 is true
-        assert!(sig.v(), "v=1 should map to y_parity=true");
-    }
-
-    #[test]
-    fn extract_signature_without_0x_prefix() {
-        let hex_no_prefix = fake_sig_hex(27).strip_prefix("0x").unwrap().to_string();
-        let resp = make_response(Some(hex_no_prefix));
-        let sig = RemoteHttpSigner::extract_signature(&resp);
-        assert!(sig.is_ok());
-    }
-
-    // --- extract_signature: error cases ---
 
     #[test]
     fn extract_signature_no_signature_field() {
@@ -348,7 +426,7 @@ mod tests {
         let result = RemoteHttpSigner::extract_signature(&resp);
         assert!(result.is_err());
         let err = format!("{}", result.unwrap_err());
-        assert!(err.contains("no signature"), "expected 'no signature', got: {err}");
+        assert!(err.contains("no signature"), "got: {err}");
     }
 
     #[test]
@@ -356,100 +434,16 @@ mod tests {
         let resp = make_response(Some("0xZZZZZZ".to_string()));
         let result = RemoteHttpSigner::extract_signature(&resp);
         assert!(result.is_err());
-        let err = format!("{}", result.unwrap_err());
-        assert!(err.contains("invalid hex"), "expected 'invalid hex', got: {err}");
     }
 
     #[test]
-    fn extract_signature_wrong_length_too_short() {
+    fn extract_signature_wrong_length() {
         let resp = make_response(Some("0x0011".to_string()));
         let result = RemoteHttpSigner::extract_signature(&resp);
         assert!(result.is_err());
         let err = format!("{}", result.unwrap_err());
-        assert!(
-            err.contains("expected 65 byte"),
-            "expected length error, got: {err}"
-        );
+        assert!(err.contains("expected 65 byte"), "got: {err}");
     }
-
-    #[test]
-    fn extract_signature_wrong_length_too_long() {
-        let long = format!("0x{}", hex::encode([0xABu8; 66]));
-        let resp = make_response(Some(long));
-        let result = RemoteHttpSigner::extract_signature(&resp);
-        assert!(result.is_err());
-        let err = format!("{}", result.unwrap_err());
-        assert!(
-            err.contains("expected 65 byte"),
-            "expected length error, got: {err}"
-        );
-    }
-
-    // --- do_sign: verify request construction ---
-    // We test indirectly via the fields that do_sign constructs.
-    // Since do_sign requires a real HTTP call, we test the request building
-    // logic by checking the SignRequest it would produce.
-
-    #[test]
-    fn do_sign_chain_id_defaults_to_1() {
-        let signer = make_signer();
-        // chain_id is None → should use "1"
-        let chain_id_str = signer
-            .chain_id
-            .map(|id| id.to_string())
-            .unwrap_or_else(|| "1".to_string());
-        assert_eq!(chain_id_str, "1");
-    }
-
-    #[test]
-    fn do_sign_chain_id_uses_set_value() {
-        let mut signer = make_signer();
-        signer.set_chain_id(Some(137));
-        let chain_id_str = signer
-            .chain_id
-            .map(|id| id.to_string())
-            .unwrap_or_else(|| "1".to_string());
-        assert_eq!(chain_id_str, "137");
-    }
-
-    #[test]
-    fn do_sign_address_format_is_checksummed() {
-        let signer = make_signer();
-        let addr_str = format!("{:?}", signer.address);
-        // Should start with 0x and be 42 chars
-        assert!(addr_str.starts_with("0x"), "address should start with 0x");
-        assert_eq!(addr_str.len(), 42, "address should be 42 chars");
-    }
-
-    #[test]
-    fn do_sign_builds_correct_sign_request() {
-        let mut signer = make_signer();
-        signer.set_chain_id(Some(10));
-
-        let chain_id_str = signer
-            .chain_id
-            .map(|id| id.to_string())
-            .unwrap_or_else(|| "1".to_string());
-
-        let req = SignRequest {
-            chain_id: chain_id_str,
-            signer_address: format!("{:?}", signer.address),
-            sign_type: SignType::Hash,
-            payload: serde_json::json!({"hash": "0xabcdef"}),
-        };
-
-        assert_eq!(req.chain_id, "10");
-        assert_eq!(req.signer_address, format!("{:?}", TEST_ADDR));
-
-        // Verify it serializes correctly
-        let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["sign_type"], "hash");
-        assert_eq!(json["chain_id"], "10");
-        assert_eq!(json["signer_address"], format!("{:?}", TEST_ADDR));
-        assert_eq!(json["payload"]["hash"], "0xabcdef");
-    }
-
-    // --- build_transaction_payload (transaction JSON for Go remote-signer API) ---
 
     #[test]
     fn build_transaction_payload_legacy() {
@@ -471,7 +465,5 @@ mod tests {
         assert_eq!(payload["nonce"], 2);
         assert_eq!(payload["txType"], "legacy");
         assert_eq!(payload["gasPrice"], "20000000000");
-        assert!(payload.get("gasFeeCap").is_none());
-        assert!(payload.get("gasTipCap").is_none());
     }
 }

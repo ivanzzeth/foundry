@@ -34,10 +34,6 @@ pub enum DistributeSubcommand {
         #[arg(long, conflicts_with_all = &["csv", "to"])]
         stdin: bool,
 
-        /// Dry run mode - simulate without sending transactions.
-        #[arg(long)]
-        dry_run: bool,
-
         #[command(flatten)]
         send_tx: SendTxOpts,
     },
@@ -60,10 +56,6 @@ pub enum DistributeSubcommand {
         #[arg(long, conflicts_with_all = &["csv", "to"])]
         stdin: bool,
 
-        /// Dry run mode - simulate without sending transactions.
-        #[arg(long)]
-        dry_run: bool,
-
         #[command(flatten)]
         send_tx: SendTxOpts,
     },
@@ -72,12 +64,12 @@ pub enum DistributeSubcommand {
 impl DistributeArgs {
     pub async fn run(self) -> Result<()> {
         match self.command {
-            DistributeSubcommand::Native { csv, to, stdin, dry_run, send_tx } => {
+            DistributeSubcommand::Native { csv, to, stdin, send_tx } => {
                 let transfers = parse_transfers(csv.as_deref(), to.as_deref(), stdin)?;
                 let config = send_tx.eth.load_config()?;
                 let provider = get_provider(&config)?;
 
-                let result = if dry_run {
+                let result = if send_tx.dry_run {
                     distribute::distribute_native(&provider, &transfers, true).await?
                 } else {
                     let signer = send_tx.eth.wallet.signer().await?;
@@ -92,12 +84,12 @@ impl DistributeArgs {
                 print_result(&result);
                 Ok(())
             }
-            DistributeSubcommand::Erc20 { token, csv, to, stdin, dry_run, send_tx } => {
+            DistributeSubcommand::Erc20 { token, csv, to, stdin, send_tx } => {
                 let transfers = parse_transfers(csv.as_deref(), to.as_deref(), stdin)?;
                 let config = send_tx.eth.load_config()?;
                 let provider = get_provider(&config)?;
 
-                let result = if dry_run {
+                let result = if send_tx.dry_run {
                     distribute::distribute_erc20(&provider, token, &transfers, true).await?
                 } else {
                     let signer = send_tx.eth.wallet.signer().await?;
