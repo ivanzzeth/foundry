@@ -105,12 +105,7 @@ pub async fn collect_native_from_mnemonic<P: Provider<AnyNetwork>>(
     end_index: u32,
     dry_run: bool,
 ) -> eyre::Result<CollectResult> {
-    let mut results = Vec::new();
-    let mut succeeded = 0usize;
-    let mut failed = 0usize;
-    let mut skipped = 0usize;
-    let mut total_amount = U256::ZERO;
-
+    let mut wallets = Vec::new();
     for index in start_index..=end_index {
         let mut builder = MnemonicBuilder::<English>::default().phrase(mnemonic);
         if let Some(pass) = passphrase {
@@ -118,42 +113,9 @@ pub async fn collect_native_from_mnemonic<P: Provider<AnyNetwork>>(
         }
         let signer = builder.index(index)?.build()?;
         let address = signer.address();
-
-        match sweep_native_single(provider, &signer, address, destination, dry_run).await {
-            Ok(Some(result)) => {
-                total_amount += result.transfer.amount;
-                if result.error.is_some() {
-                    failed += 1;
-                } else {
-                    succeeded += 1;
-                }
-                results.push(result);
-            }
-            Ok(None) => {
-                debug!(address = ?address, index = index, "Skipped: insufficient balance");
-                skipped += 1;
-            }
-            Err(e) => {
-                warn!(address = ?address, index = index, error = %e, "Failed to sweep");
-                results.push(TransferResult {
-                    transfer: Transfer { to: destination, amount: U256::ZERO },
-                    tx_hash: None,
-                    error: Some(e.to_string()),
-                });
-                failed += 1;
-            }
-        }
+        wallets.push((address, EthereumWallet::new(signer)));
     }
-
-    let total = (end_index - start_index + 1) as usize;
-    Ok(CollectResult {
-        total,
-        succeeded,
-        failed,
-        skipped,
-        results,
-        total_amount,
-    })
+    collect_native_from_wallets(provider, destination, wallets, dry_run).await
 }
 
 /// Collects ERC20 tokens from mnemonic-derived wallets to a destination.
@@ -167,12 +129,7 @@ pub async fn collect_erc20_from_mnemonic<P: Provider<AnyNetwork>>(
     end_index: u32,
     dry_run: bool,
 ) -> eyre::Result<CollectResult> {
-    let mut results = Vec::new();
-    let mut succeeded = 0usize;
-    let mut failed = 0usize;
-    let mut skipped = 0usize;
-    let mut total_amount = U256::ZERO;
-
+    let mut wallets = Vec::new();
     for index in start_index..=end_index {
         let mut builder = MnemonicBuilder::<English>::default().phrase(mnemonic);
         if let Some(pass) = passphrase {
@@ -180,23 +137,39 @@ pub async fn collect_erc20_from_mnemonic<P: Provider<AnyNetwork>>(
         }
         let signer = builder.index(index)?.build()?;
         let address = signer.address();
+        wallets.push((address, EthereumWallet::new(signer)));
+    }
+    collect_erc20_from_wallets(provider, token, destination, wallets, dry_run).await
+}
 
-        match sweep_erc20_single(provider, &signer, address, token, destination, dry_run).await {
+/// Collects native tokens from pre-built wallets to a destination.
+/// Each entry is (source_address, wallet). Use this for remote-signer or any non-mnemonic signer.
+pub async fn collect_native_from_wallets<P: Provider<AnyNetwork>>(
+    provider: &P,
+    destination: Address,
+    wallets: Vec<(Address, EthereumWallet)>,
+    dry_run: bool,
+) -> eyre::Result<CollectResult> {
+    let total = wallets.len();
+    let mut results = Vec::new();
+    let mut succeeded = 0usize;
+    let mut failed = 0usize;
+    let mut skipped = 0usize;
+    let mut total_amount = U256::ZERO;
+
+    for (address, wallet) in wallets {
+        match sweep_native_single(provider, wallet, address, destination, dry_run).await {
             Ok(Some(result)) => {
                 total_amount += result.transfer.amount;
-                if result.error.is_some() {
-                    failed += 1;
-                } else {
-                    succeeded += 1;
-                }
+                if result.error.is_some() { failed += 1; } else { succeeded += 1; }
                 results.push(result);
             }
             Ok(None) => {
-                debug!(address = ?address, index = index, "Skipped: zero ERC20 balance");
+                debug!(address = ?address, "Skipped: insufficient balance");
                 skipped += 1;
             }
             Err(e) => {
-                warn!(address = ?address, index = index, error = %e, "Failed to sweep ERC20");
+                warn!(address = ?address, error = %e, "Failed to sweep");
                 results.push(TransferResult {
                     transfer: Transfer { to: destination, amount: U256::ZERO },
                     tx_hash: None,
@@ -207,22 +180,56 @@ pub async fn collect_erc20_from_mnemonic<P: Provider<AnyNetwork>>(
         }
     }
 
-    let total = (end_index - start_index + 1) as usize;
-    Ok(CollectResult {
-        total,
-        succeeded,
-        failed,
-        skipped,
-        results,
-        total_amount,
-    })
+    Ok(CollectResult { total, succeeded, failed, skipped, results, total_amount })
+}
+
+/// Collects ERC20 tokens from pre-built wallets to a destination.
+/// Each entry is (source_address, wallet). Use this for remote-signer or any non-mnemonic signer.
+pub async fn collect_erc20_from_wallets<P: Provider<AnyNetwork>>(
+    provider: &P,
+    token: Address,
+    destination: Address,
+    wallets: Vec<(Address, EthereumWallet)>,
+    dry_run: bool,
+) -> eyre::Result<CollectResult> {
+    let total = wallets.len();
+    let mut results = Vec::new();
+    let mut succeeded = 0usize;
+    let mut failed = 0usize;
+    let mut skipped = 0usize;
+    let mut total_amount = U256::ZERO;
+
+    for (address, wallet) in wallets {
+        match sweep_erc20_single(provider, wallet, address, token, destination, dry_run).await {
+            Ok(Some(result)) => {
+                total_amount += result.transfer.amount;
+                if result.error.is_some() { failed += 1; } else { succeeded += 1; }
+                results.push(result);
+            }
+            Ok(None) => {
+                debug!(address = ?address, "Skipped: zero ERC20 balance");
+                skipped += 1;
+            }
+            Err(e) => {
+                warn!(address = ?address, error = %e, "Failed to sweep ERC20");
+                results.push(TransferResult {
+                    transfer: Transfer { to: destination, amount: U256::ZERO },
+                    tx_hash: None,
+                    error: Some(e.to_string()),
+                });
+                failed += 1;
+            }
+        }
+    }
+
+    Ok(CollectResult { total, succeeded, failed, skipped, results, total_amount })
 }
 
 /// Sweeps native tokens from a single wallet.
 /// Returns None if balance is insufficient to cover gas.
 async fn sweep_native_single<P: Provider<AnyNetwork>>(
     provider: &P,
-    signer: &PrivateKeySigner,
+    wallet: EthereumWallet,
     from: Address,
     to: Address,
     dry_run: bool,
@@ -255,7 +262,6 @@ async fn sweep_native_single<P: Provider<AnyNetwork>>(
         }));
     }
 
-    let wallet = EthereumWallet::new(signer.clone());
     let signed_provider = ProviderBuilder::<_, _, AnyNetwork>::default()
         .with_recommended_fillers()
         .wallet(wallet)
@@ -292,7 +298,7 @@ async fn sweep_native_single<P: Provider<AnyNetwork>>(
 /// Returns None if balance is zero.
 async fn sweep_erc20_single<P: Provider<AnyNetwork>>(
     provider: &P,
-    signer: &PrivateKeySigner,
+    wallet: EthereumWallet,
     from: Address,
     token: Address,
     to: Address,
@@ -336,7 +342,6 @@ async fn sweep_erc20_single<P: Provider<AnyNetwork>>(
     }
     .abi_encode();
 
-    let wallet = EthereumWallet::new(signer.clone());
     let signed_provider = ProviderBuilder::<_, _, AnyNetwork>::default()
         .with_recommended_fillers()
         .wallet(wallet)
