@@ -186,22 +186,41 @@ impl WalletSigner {
         }
     }
 
+    /// TLS paths: (ca_file, cert_file, key_file) for mTLS.
+    /// When `skip_verify` is true, server certificate verification is skipped (insecure).
+    /// Exactly one of `api_key_hex` or `api_key_file` must be set.
     pub fn from_remote_signer(
         url: &str,
         api_key_id: String,
-        api_key_hex: &str,
+        api_key_hex: Option<&str>,
+        api_key_file: Option<&str>,
         address: Address,
+        tls_paths: Option<(String, String, String)>,
+        skip_verify: bool,
     ) -> Result<Self> {
         #[cfg(feature = "signer-remote")]
         {
-            let signer = RemoteHttpSigner::new(url, api_key_id, api_key_hex, address)
-                .map_err(|e| WalletSignerError::RemoteSigner(e.to_string()))?;
+            let tls = tls_paths.map(|(ca, cert, key)| foundry_remote_signer::TlsConfig {
+                ca_file: Some(ca),
+                cert_file: Some(cert),
+                key_file: Some(key),
+                skip_verify,
+            });
+            let signer = RemoteHttpSigner::new(
+                url,
+                api_key_id,
+                api_key_hex,
+                api_key_file,
+                address,
+                tls,
+            )
+            .map_err(|e| WalletSignerError::RemoteSigner(e.to_string()))?;
             Ok(Self::Remote(signer))
         }
 
         #[cfg(not(feature = "signer-remote"))]
         {
-            let _ = (url, api_key_id, api_key_hex, address);
+            let _ = (url, api_key_id, api_key_hex, api_key_file, address, tls_paths, skip_verify);
             Err(WalletSignerError::remote_signer_unsupported())
         }
     }

@@ -24,15 +24,19 @@ alloy-rlp.workspace = true
 
 async-trait.workspace = true
 eyre.workspace = true
-reqwest = { workspace = true, features = ["json"] }
+remote-signer-client = { path = "../../../remote-signer/pkg/rs-client" }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["time", "rt-multi-thread"] }
 tracing.workspace = true
 thiserror.workspace = true
 
-ed25519-dalek = { version = "2", features = ["rand_core"] }
 hex = "0.4"
-sha2 = "0.10"
-rand = "0.8"
-base64 = "0.22"
+
+[[bin]]
+name = "unlock_signer"
+path = "src/bin/unlock_signer.rs"
+
+[[bin]]
+name = "create_signer"
+path = "src/bin/create_signer.rs"

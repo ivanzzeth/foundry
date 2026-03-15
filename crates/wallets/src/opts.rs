@@ -200,6 +200,17 @@ pub struct WalletOpts {
     )]
     pub remote_signer_api_key: Option<String>,
 
+    /// Path to PEM file containing Ed25519 API key (e.g. data/admin_private.pem). Use this or --remote-signer-api-key.
+    #[arg(
+        long = "remote-signer-api-key-file",
+        help_heading = "Wallet options - remote",
+        value_name = "PATH",
+        env = "REMOTE_SIGNER_API_KEY_FILE",
+        hide = !cfg!(feature = "signer-remote"),
+        requires = "remote_signer_url"
+    )]
+    pub remote_signer_api_key_file: Option<String>,
+
     /// Remote signer address.
     #[arg(
         long = "remote-signer-address",
@@ -210,6 +221,45 @@ pub struct WalletOpts {
         requires = "remote_signer_url"
     )]
     pub remote_signer_address: Option<Address>,
+
+    /// Remote signer TLS CA file (verify server). Use with cert/key for mTLS; cert verification is never skipped.
+    #[arg(
+        long = "remote-signer-ca-file",
+        help_heading = "Wallet options - remote",
+        value_name = "PATH",
+        env = "REMOTE_SIGNER_CA_FILE",
+        hide = !cfg!(feature = "signer-remote")
+    )]
+    pub remote_signer_ca_file: Option<String>,
+
+    /// Remote signer TLS client cert file (mTLS).
+    #[arg(
+        long = "remote-signer-client-cert-file",
+        help_heading = "Wallet options - remote",
+        value_name = "PATH",
+        env = "REMOTE_SIGNER_CLIENT_CERT_FILE",
+        hide = !cfg!(feature = "signer-remote")
+    )]
+    pub remote_signer_cert_file: Option<String>,
+
+    /// Remote signer TLS client key file (mTLS).
+    #[arg(
+        long = "remote-signer-client-key-file",
+        help_heading = "Wallet options - remote",
+        value_name = "PATH",
+        env = "REMOTE_SIGNER_CLIENT_KEY_FILE",
+        hide = !cfg!(feature = "signer-remote")
+    )]
+    pub remote_signer_key_file: Option<String>,
+
+    /// Skip TLS server certificate verification (insecure; testing only).
+    #[arg(
+        long = "remote-signer-tls-insecure-skip-verify",
+        help_heading = "Wallet options - remote",
+        env = "REMOTE_SIGNER_TLS_INSECURE_SKIP_VERIFY",
+        hide = !cfg!(feature = "signer-remote")
+    )]
+    pub remote_signer_tls_insecure_skip_verify: Option<bool>,
 }
 
 impl WalletOpts {
@@ -240,13 +290,45 @@ impl WalletOpts {
             let api_key_id = self.remote_signer_api_key_id.as_deref().map(String::from)
                 .or_else(|| std::env::var("REMOTE_SIGNER_API_KEY_ID").ok())
                 .ok_or_else(|| eyre::eyre!("REMOTE_SIGNER_API_KEY_ID is required for remote signer"))?;
-            let api_key = self.remote_signer_api_key.as_deref().map(String::from)
-                .or_else(|| std::env::var("REMOTE_SIGNER_API_KEY").ok())
-                .ok_or_else(|| eyre::eyre!("REMOTE_SIGNER_API_KEY is required for remote signer"))?;
+            let api_key_hex = self.remote_signer_api_key.as_deref().map(String::from)
+                .or_else(|| std::env::var("REMOTE_SIGNER_API_KEY").ok());
+            let api_key_file = self.remote_signer_api_key_file.clone()
+                .or_else(|| std::env::var("REMOTE_SIGNER_API_KEY_FILE").ok());
+            if api_key_hex.is_none() && api_key_file.is_none() {
+                eyre::bail!("REMOTE_SIGNER_API_KEY or REMOTE_SIGNER_API_KEY_FILE is required for remote signer");
+            }
+            if api_key_hex.is_some() && api_key_file.is_some() {
+                eyre::bail!("set only one of REMOTE_SIGNER_API_KEY or REMOTE_SIGNER_API_KEY_FILE");
+            }
             let address = self.remote_signer_address
                 .or_else(|| std::env::var("REMOTE_SIGNER_ADDRESS").ok().and_then(|s| s.parse().ok()))
                 .ok_or_else(|| eyre::eyre!("REMOTE_SIGNER_ADDRESS is required for remote signer"))?;
-            WalletSigner::from_remote_signer(url, api_key_id, &api_key, address)?
+            let ca = self.remote_signer_ca_file.clone()
+                .or_else(|| std::env::var("REMOTE_SIGNER_CA_FILE").ok());
+            let cert = self.remote_signer_cert_file.clone()
+                .or_else(|| std::env::var("REMOTE_SIGNER_CLIENT_CERT_FILE").ok());
+            let key = self.remote_signer_key_file.clone()
+                .or_else(|| std::env::var("REMOTE_SIGNER_CLIENT_KEY_FILE").ok());
+            let tls_paths = match (ca, cert, key) {
+                (Some(ca), Some(cert), Some(key)) => Some((ca, cert, key)),
+                _ => None,
+            };
+            let skip_verify = self.remote_signer_tls_insecure_skip_verify
+                .or_else(|| {
+                    std::env::var("REMOTE_SIGNER_TLS_INSECURE_SKIP_VERIFY").ok().and_then(|v| {
+                        matches!(v.to_lowercase().as_str(), "1" | "true" | "yes").then_some(true)
+                    })
+                })
+                .unwrap_or(false);
+            WalletSigner::from_remote_signer(
+                url,
+                api_key_id,
+                api_key_hex.as_deref(),
+                api_key_file.as_deref(),
+                address,
+                tls_paths,
+                skip_verify,
+            )?
         } else if self.ledger {
             utils::create_ledger_signer(self.raw.hd_path.as_deref(), self.raw.mnemonic_index)
                 .await?
@@ -389,7 +471,12 @@ mod tests {
             remote_signer_url: None,
             remote_signer_api_key_id: None,
             remote_signer_api_key: None,
+            remote_signer_api_key_file: None,
             remote_signer_address: None,
+            remote_signer_ca_file: None,
+            remote_signer_cert_file: None,
+            remote_signer_key_file: None,
+            remote_signer_tls_insecure_skip_verify: None,
         };
         match wallet.signer().await {
             Ok(_) => {
