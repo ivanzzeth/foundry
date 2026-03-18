@@ -63,7 +63,7 @@ use alloy_rpc_types::{
     anvil::Forking,
     request::TransactionRequest,
     serde_helpers::JsonStorageKey,
-    simulate::{SimBlock, SimCallResult, SimulatePayload, SimulatedBlock},
+    simulate::{MAX_SIMULATE_BLOCKS, SimBlock, SimCallResult, SimulatePayload, SimulatedBlock},
     state::EvmOverrides,
     trace::{
         filter::TraceFilter,
@@ -2558,8 +2558,18 @@ impl Backend<FoundryNetwork> {
                 validation,
                 return_full_transactions,
             } = request;
+
+            if block_state_calls.len() > MAX_SIMULATE_BLOCKS as usize {
+                return Err(BlockchainError::Message(format!(
+                    "too many blocks in simulateV1: {} > {}",
+                    block_state_calls.len(),
+                    MAX_SIMULATE_BLOCKS
+                )));
+            }
+
             let mut cache_db = CacheDB::new(state);
             let mut block_res = Vec::with_capacity(block_state_calls.len());
+            let mut prev_block_hash = self.best_hash();
 
             // execute the blocks
             for block in block_state_calls {
@@ -2597,8 +2607,13 @@ impl Backend<FoundryNetwork> {
                     // Always disable EIP-3607
                     env.evm_env.cfg_env.disable_eip3607 = true;
 
-                    if !validation {
-                        env.evm_env.cfg_env.disable_base_fee = !validation;
+                    if validation {
+                        // Re-enable checks that build_call_env disabled
+                        env.evm_env.cfg_env.disable_nonce_check = false;
+                        env.evm_env.cfg_env.disable_base_fee = false;
+                        env.evm_env.cfg_env.disable_block_gas_limit = false;
+                    } else {
+                        env.evm_env.cfg_env.disable_base_fee = true;
                         env.evm_env.block_env.basefee = 0;
                     }
 
@@ -2662,10 +2677,16 @@ impl Backend<FoundryNetwork> {
                         gas_used: result.gas_used(),
                         status: result.is_success(),
                         error: result.is_success().not().then(|| {
+                            let revert_data = result.output().cloned();
+                            let message = if let Some(ref data) = revert_data {
+                                format!("execution reverted: 0x{}", hex::encode(data))
+                            } else {
+                                "execution reverted".to_string()
+                            };
                             alloy_rpc_types::simulate::SimulateError {
                                 code: -3200,
-                                message: "execution failed".to_string(),
-                                data: None,
+                                message,
+                                data: revert_data.map(|d| d.into()),
                             }
                         }),
                         logs: result.clone()
@@ -2698,7 +2719,7 @@ impl Backend<FoundryNetwork> {
                     logs_bloom: logs_bloom(logs.iter()),
                     transactions_root: calculate_transaction_root(&transactions_envelopes),
                     receipts_root: calculate_receipt_root(&transactions_envelopes),
-                    parent_hash: Default::default(),
+                    parent_hash: prev_block_hash,
                     beneficiary: block_env.beneficiary,
                     state_root: Default::default(),
                     difficulty: Default::default(),
@@ -2717,9 +2738,11 @@ impl Backend<FoundryNetwork> {
                     requests_hash: None,
                     ..Default::default()
                 };
+                let block_hash = header.hash_slow();
+                prev_block_hash = block_hash;
                 let mut block = alloy_rpc_types::Block {
                     header: AnyRpcHeader {
-                        hash: header.hash_slow(),
+                        hash: block_hash,
                         inner: header.into(),
                         total_difficulty: None,
                         size: None,
