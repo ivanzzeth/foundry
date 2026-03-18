@@ -1909,7 +1909,17 @@ impl EthApi<FoundryNetwork> {
         block_number: Option<BlockId>,
     ) -> Result<Vec<SimulatedBlock<AnyRpcBlock>>> {
         node_info!("eth_simulateV1");
-        let block_request = self.block_request(block_number).await?;
+        // For eth_simulateV1, future block numbers should return -32000 "header not found"
+        let block_request = match self.block_request(block_number).await {
+            Ok(req) => req,
+            Err(BlockchainError::BlockOutOfRange(_, _)) => {
+                return Err(BlockchainError::SimulateError {
+                    code: -32000,
+                    message: "header not found".to_string(),
+                });
+            }
+            Err(e) => return Err(e),
+        };
         // check if the number predates the fork, if in fork mode
         if let BlockRequest::Number(number) = block_request
             && let Some(fork) = self.get_fork()

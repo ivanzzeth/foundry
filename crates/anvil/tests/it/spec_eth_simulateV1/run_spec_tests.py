@@ -7,7 +7,34 @@ import sys
 import urllib.request
 
 ANVIL_URL = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:18546"
-SPEC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eth_simulateV1")
+SPEC_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Pre-mine 45 blocks so block head is at 0x2d (45), matching spec test expectations
+print("Pre-mining 45 blocks...")
+for _ in range(45):
+    try:
+        mine_req = urllib.request.Request(
+            ANVIL_URL,
+            data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "evm_mine", "params": []}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(mine_req, timeout=5) as resp:
+            resp.read()
+    except Exception:
+        pass
+
+# Verify block number
+try:
+    bn_req = urllib.request.Request(
+        ANVIL_URL,
+        data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []}).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(bn_req, timeout=5) as resp:
+        bn = json.loads(resp.read().decode()).get("result", "0x0")
+        print(f"Block number: {bn} ({int(bn, 16)})")
+except Exception as e:
+    print(f"Warning: could not verify block number: {e}")
 
 passed = 0
 failed = 0

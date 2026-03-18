@@ -124,6 +124,14 @@ pub enum BlockchainError {
     InvalidTransactionRequest(String),
     #[error("filter not found")]
     FilterNotFound,
+    /// eth_simulateV1 spec-specific errors with custom error codes
+    #[error("{message}")]
+    SimulateError {
+        /// The spec-defined error code (e.g. -38012, -38013, etc.)
+        code: i32,
+        /// Human-readable error message
+        message: String,
+    },
 }
 
 impl From<eyre::Report> for BlockchainError {
@@ -581,6 +589,11 @@ impl<T: Serialize> ToRpcResponseResult for Result<T> {
                 BlockchainError::FilterNotFound => RpcError {
                     code: ErrorCode::ServerError(-32000),
                     message: "filter not found".into(),
+                    data: None,
+                },
+                BlockchainError::SimulateError { code, message } => RpcError {
+                    code: ErrorCode::ServerError(code as i64),
+                    message: message.into(),
                     data: None,
                 },
             }

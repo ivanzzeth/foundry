@@ -2560,32 +2560,254 @@ impl Backend<FoundryNetwork> {
             } = request;
 
             if block_state_calls.len() > MAX_SIMULATE_BLOCKS as usize {
-                return Err(BlockchainError::Message(format!(
-                    "too many blocks in simulateV1: {} > {}",
-                    block_state_calls.len(),
-                    MAX_SIMULATE_BLOCKS
-                )));
+                return Err(BlockchainError::SimulateError {
+                    code: -38026,
+                    message: "too many blocks".to_string(),
+                });
             }
 
             let mut cache_db = CacheDB::new(state);
             let mut block_res = Vec::with_capacity(block_state_calls.len());
             let mut prev_block_hash = self.best_hash();
 
-            // execute the blocks
-            for block in block_state_calls {
+            // Track previous block number and timestamp for ordering validation.
+            // block_env.number is the HEAD block number; simulated blocks start at head+1.
+            let prev_block_number: u64 = block_env.number.saturating_to();
+            let prev_block_timestamp: u64 = block_env.timestamp.saturating_to();
+            // Advance block_env to head+1 so intermediate block generation works correctly
+            block_env.number = U256::from(prev_block_number + 1);
+            block_env.timestamp += U256::from(12);
+
+            // Pre-process: resolve all block numbers and timestamps.
+            // Block numbers/timestamps can be explicitly overridden or auto-incremented.
+            // When block numbers jump, intermediate empty blocks are generated with 12s increment.
+            // The auto-assigned timestamp for a block after a gap accounts for intermediate blocks.
+            let mut resolved_numbers: Vec<u64> = Vec::with_capacity(block_state_calls.len());
+            let mut resolved_timestamps: Vec<u64> = Vec::with_capacity(block_state_calls.len());
+            {
+                // cur_num/cur_ts track the default number/timestamp for the next blockStateCall.
+                // The first simulated block is at head+1.
+                let mut cur_num = prev_block_number + 1;
+                let mut cur_ts = prev_block_timestamp + 12;
+                for (block_idx, block) in block_state_calls.iter().enumerate() {
+                    let num = block.block_overrides.as_ref()
+                        .and_then(|o| o.number)
+                        .map(|n| n.saturating_to::<u64>())
+                        .unwrap_or(cur_num);
+
+                    // If there's a number gap from the expected auto-increment,
+                    // adjust cur_ts to account for intermediate blocks
+                    if num > cur_num {
+                        let extra_blocks = num - cur_num;
+                        cur_ts = cur_ts.saturating_add(extra_blocks * 12);
+                    }
+
+                    let ts = block.block_overrides.as_ref()
+                        .and_then(|o| o.time)
+                        .unwrap_or(cur_ts);
+
+                    // Validate block number ordering
+                    if block_idx > 0 {
+                        if num <= resolved_numbers[block_idx - 1] {
+                            return Err(BlockchainError::SimulateError {
+                                code: -38020,
+                                message: format!(
+                                    "block numbers must be in order: {} <= {}",
+                                    num, resolved_numbers[block_idx - 1]
+                                ),
+                            });
+                        }
+                    } else if num <= prev_block_number {
+                        // First block number must be > head block number
+                        return Err(BlockchainError::SimulateError {
+                            code: -38020,
+                            message: format!(
+                                "block numbers must be in order: {} <= {}",
+                                num, prev_block_number
+                            ),
+                        });
+                    }
+
+                    // Validate timestamp ordering between simulated blocks
+                    // (only between blockStateCalls, not against the head)
+                    if block_idx > 0 && ts <= resolved_timestamps[block_idx - 1] {
+                        return Err(BlockchainError::SimulateError {
+                            code: -38021,
+                            message: format!(
+                                "block timestamps must be in order: {} <= {}",
+                                ts, resolved_timestamps[block_idx - 1]
+                            ),
+                        });
+                    }
+
+                    // If an explicit timestamp override is set, check that intermediate block
+                    // timestamps (auto-incremented by 12s) don't exceed the target timestamp.
+                    // For the first blockStateCall, check against the HEAD timestamp; for subsequent
+                    // ones, check against the previous blockStateCall's timestamp.
+                    // However, for the first block, only check if there actually are intermediate
+                    // blocks (i.e., the block number is overridden higher than head+1).
+                    if block.block_overrides.as_ref().and_then(|o| o.time).is_some() {
+                        let (ref_ts, ref_num) = if block_idx > 0 {
+                            (resolved_timestamps[block_idx - 1], resolved_numbers[block_idx - 1])
+                        } else {
+                            (prev_block_timestamp, prev_block_number)
+                        };
+                        let gap = num.saturating_sub(ref_num + 1);
+                        if gap > 0 {
+                            let last_intermediate_ts = ref_ts + gap * 12;
+                            if ts <= last_intermediate_ts {
+                                return Err(BlockchainError::SimulateError {
+                                    code: -38021,
+                                    message: format!(
+                                        "block timestamps must be in order: {} <= {}",
+                                        ts, last_intermediate_ts
+                                    ),
+                                });
+                            }
+                        }
+                    }
+
+                    resolved_numbers.push(num);
+                    resolved_timestamps.push(ts);
+                    cur_num = num + 1;
+                    cur_ts = ts.saturating_add(12);
+                }
+            }
+
+            // execute the blocks, including intermediate empty blocks for number gaps
+            for (block_idx, block) in block_state_calls.into_iter().enumerate() {
                 let SimBlock { block_overrides, state_overrides, calls } = block;
+
+                let target_number = resolved_numbers[block_idx];
+                let target_timestamp = resolved_timestamps[block_idx];
+
+                // Generate intermediate empty blocks if block number jumps
+                // block_env.number is already set to prev_target+1 (or head+1 for first),
+                // so it represents the next expected block number.
+                let next_expected: u64 = block_env.number.saturating_to();
+                if target_number > next_expected {
+                    // Generate (target_number - next_expected) intermediate empty blocks
+                    let gap = target_number - next_expected;
+                    let ts_start: u64 = block_env.timestamp.saturating_to();
+                    for i in 0..gap {
+                        block_env.number = U256::from(next_expected + i);
+                        // Calculate intermediate timestamp:
+                        // If target_timestamp > ts_start, use 12s auto-increment
+                        // If target_timestamp <= ts_start (explicit override lower than head),
+                        // interpolate from target_timestamp backwards
+                        let intermediate_ts = if target_timestamp > ts_start {
+                            // Normal case: auto-increment by 12s
+                            ts_start + (i + 1) * 12
+                        } else {
+                            // Target is before current: count backwards from target
+                            // intermediate[last] should be just before target_timestamp
+                            target_timestamp.saturating_sub((gap - i) * 12)
+                        };
+                        block_env.timestamp = U256::from(intermediate_ts);
+
+                        let header = Header {
+                            logs_bloom: Default::default(),
+                            transactions_root: alloy_consensus::EMPTY_ROOT_HASH,
+                            receipts_root: alloy_consensus::EMPTY_ROOT_HASH,
+                            parent_hash: prev_block_hash,
+                            beneficiary: block_env.beneficiary,
+                            state_root: Default::default(),
+                            difficulty: Default::default(),
+                            number: block_env.number.saturating_to(),
+                            gas_limit: block_env.gas_limit,
+                            gas_used: 0,
+                            timestamp: block_env.timestamp.saturating_to(),
+                            extra_data: Default::default(),
+                            mix_hash: Default::default(),
+                            nonce: Default::default(),
+                            base_fee_per_gas: Some(block_env.basefee),
+                            withdrawals_root: None,
+                            blob_gas_used: None,
+                            excess_blob_gas: None,
+                            parent_beacon_block_root: None,
+                            requests_hash: None,
+                            ..Default::default()
+                        };
+                        let block_hash = header.hash_slow();
+                        prev_block_hash = block_hash;
+
+                        let mut rpc_block = alloy_rpc_types::Block {
+                            header: AnyRpcHeader {
+                                hash: block_hash,
+                                inner: header.into(),
+                                total_difficulty: None,
+                                size: None,
+                            },
+                            uncles: vec![],
+                            transactions: BlockTransactions::Full(vec![]),
+                            withdrawals: None,
+                        };
+                        if !return_full_transactions {
+                            rpc_block.transactions.convert_to_hashes();
+                        }
+                        let simulated_block = SimulatedBlock {
+                            inner: AnyRpcBlock::new(WithOtherFields::new(rpc_block)),
+                            calls: vec![],
+                        };
+                        block_env.basefee = simulated_block
+                            .inner
+                            .header
+                            .next_block_base_fee(self.fees.base_fee_params())
+                            .unwrap_or_default();
+                        block_res.push(simulated_block);
+                    }
+                }
+
+                // Set block env to target
+                block_env.number = U256::from(target_number);
+                block_env.timestamp = U256::from(target_timestamp);
+
+                // Validate movePrecompileToAddress in state overrides before applying
+                if let Some(ref state_overrides) = state_overrides {
+                    for (addr, account_override) in state_overrides.iter() {
+                        if let Some(dest) = account_override.move_precompile_to {
+                            // Source must be a precompile (0x01..0x09)
+                            let addr_bytes: [u8; 20] = addr.0.into();
+                            let is_precompile = addr_bytes[..19].iter().all(|b| *b == 0)
+                                && addr_bytes[19] >= 1
+                                && addr_bytes[19] <= 9;
+                            if !is_precompile {
+                                return Err(BlockchainError::SimulateError {
+                                    code: -32000,
+                                    message: format!("account {} is not a precompile", addr),
+                                });
+                            }
+                            // Source != destination
+                            if *addr == dest {
+                                return Err(BlockchainError::SimulateError {
+                                    code: -38022,
+                                    message: format!(
+                                        "movePrecompileToAddress: source {} equals destination",
+                                        addr
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                }
+
                 let mut call_res = Vec::with_capacity(calls.len());
                 let mut log_index = 0;
                 let mut gas_used = 0;
                 let mut transactions = Vec::with_capacity(calls.len());
-                let mut logs= Vec::new();
+                let mut logs = Vec::new();
 
                 // apply state overrides before executing the transactions
                 if let Some(state_overrides) = state_overrides {
                     apply_state_overrides(state_overrides, &mut cache_db)?;
                 }
                 if let Some(block_overrides) = block_overrides {
+                    // Apply remaining block overrides (gas_limit, coinbase, etc.)
+                    // but number and timestamp are already set above
                     cache_db.apply_block_overrides(block_overrides, &mut block_env);
+                    // Re-apply target number/timestamp since apply_block_overrides may have set them
+                    block_env.number = U256::from(target_number);
+                    block_env.timestamp = U256::from(target_timestamp);
                 }
 
                 // execute all calls in that block
@@ -2607,6 +2829,15 @@ impl Backend<FoundryNetwork> {
                     // Always disable EIP-3607
                     env.evm_env.cfg_env.disable_eip3607 = true;
 
+                    // Auto-fill nonce from account state if not explicitly set.
+                    // Look up the account's current nonce from the cache_db.
+                    if request.nonce.is_none() {
+                        let caller = request.from.unwrap_or_default();
+                        if let Some(account) = cache_db.cache.accounts.get(&caller) {
+                            env.tx.base.nonce = account.info.nonce;
+                        }
+                    }
+
                     if validation {
                         // Re-enable checks that build_call_env disabled
                         env.evm_env.cfg_env.disable_nonce_check = false;
@@ -2620,18 +2851,15 @@ impl Backend<FoundryNetwork> {
                     let mut inspector = self.build_inspector();
 
                     // transact
-                    let ResultAndState { result, state } = if trace_transfers {
-                        // prepare inspector to capture transfer inside the evm so they are
-                        // recorded and included in logs
+                    let res = if trace_transfers {
                         inspector = inspector.with_transfers();
-                        let mut evm= self.new_evm_with_inspector_ref(
+                        let mut evm = self.new_evm_with_inspector_ref(
                             &cache_db,
                             &env,
                             &mut inspector,
                         );
-
                         trace!(target: "backend", env=?env.evm_env, spec=?env.evm_env.spec_id(),"simulate evm env");
-                        evm.transact(env.tx)?
+                        evm.transact(env.tx)
                     } else {
                         let mut evm = self.new_evm_with_inspector_ref(
                             &cache_db,
@@ -2639,8 +2867,76 @@ impl Backend<FoundryNetwork> {
                             &mut inspector,
                         );
                         trace!(target: "backend", env=?env.evm_env, spec=?env.evm_env.spec_id(),"simulate evm env");
-                        evm.transact(env.tx)?
+                        evm.transact(env.tx)
                     };
+
+                    // Map EVM errors to spec-specific error codes
+                    let ResultAndState { result, state } = match res {
+                        Ok(r) => r,
+                        Err(e) => {
+                            let bc_err: BlockchainError = e.into();
+                            // Map to spec-specific error codes
+                            match &bc_err {
+                                BlockchainError::InvalidTransaction(tx_err) => {
+                                    match tx_err {
+                                        InvalidTransactionError::GasTooLow
+                                        | InvalidTransactionError::GasTooHigh(_) => {
+                                            return Err(BlockchainError::SimulateError {
+                                                code: -38013,
+                                                message: format!("err: {}", tx_err),
+                                            });
+                                        }
+                                        InvalidTransactionError::InsufficientFunds => {
+                                            return Err(BlockchainError::SimulateError {
+                                                code: -38014,
+                                                message: format!("err: {}", tx_err),
+                                            });
+                                        }
+                                        InvalidTransactionError::InsufficientFundsForTransfer => {
+                                            return Err(BlockchainError::SimulateError {
+                                                code: -38014,
+                                                message: format!("err: {}", tx_err),
+                                            });
+                                        }
+                                        InvalidTransactionError::FeeCapTooLow => {
+                                            if validation {
+                                                return Err(BlockchainError::SimulateError {
+                                                    code: -32602,
+                                                    message: format!("err: {}", tx_err),
+                                                });
+                                            } else {
+                                                return Err(BlockchainError::SimulateError {
+                                                    code: -38012,
+                                                    message: format!("err: {}", tx_err),
+                                                });
+                                            }
+                                        }
+                                        InvalidTransactionError::NonceMaxValue => {
+                                            return Err(BlockchainError::SimulateError {
+                                                code: -32603,
+                                                message: format!("err: {}", tx_err),
+                                            });
+                                        }
+                                        InvalidTransactionError::NonceTooLow => {
+                                            return Err(BlockchainError::SimulateError {
+                                                code: -32602,
+                                                message: format!("err: {}", tx_err),
+                                            });
+                                        }
+                                        InvalidTransactionError::NonceTooHigh => {
+                                            return Err(BlockchainError::SimulateError {
+                                                code: -32602,
+                                                message: format!("err: {}", tx_err),
+                                            });
+                                        }
+                                        _ => return Err(bc_err),
+                                    }
+                                }
+                                _ => return Err(bc_err),
+                            }
+                        }
+                    };
+
                     trace!(target: "backend", ?result, ?request, "simulate call");
 
                     inspector.print_logs();
@@ -2655,10 +2951,16 @@ impl Backend<FoundryNetwork> {
                     // create the transaction from a request
                     let from = request.from.unwrap_or_default();
 
-                    let mut request = Into::<FoundryTransactionRequest>::into(WithOtherFields::new(request));
-                    request.prep_for_submission();
+                    // Build a transaction object for the response.
+                    // If `to` is missing, set it to Create (contract creation) so build_unsigned succeeds.
+                    let mut tx_request = Into::<FoundryTransactionRequest>::into(WithOtherFields::new(request.clone()));
+                    if request.to.is_none() {
+                        // Set to Create explicitly to avoid build_unsigned failing
+                        tx_request.as_mut().to = Some(TxKind::Create);
+                    }
+                    tx_request.prep_for_submission();
 
-                    let typed_tx = request.build_unsigned().map_err(|e| BlockchainError::InvalidTransactionRequest(e.to_string()))?;
+                    let typed_tx = tx_request.build_unsigned().map_err(|e| BlockchainError::InvalidTransactionRequest(e.to_string()))?;
 
                     let tx = build_impersonated(typed_tx);
                     let tx_hash = tx.hash();
@@ -2715,6 +3017,19 @@ impl Backend<FoundryNetwork> {
                 .iter()
                 .map(|tx| AnyTxEnvelope::from(tx.clone()))
                 .collect();
+
+                // Determine blob_gas_used from transactions
+                let block_blob_gas_used: u64 = transactions_envelopes.iter().map(|tx| {
+                    // Check if transaction has blob hashes - each blob uses 131072 gas
+                    match tx {
+                        AnyTxEnvelope::Ethereum(envelope) => {
+                            use alloy_consensus::Transaction as TxTrait;
+                            envelope.blob_gas_used().unwrap_or(0)
+                        }
+                        _ => 0,
+                    }
+                }).sum();
+
                 let header = Header {
                     logs_bloom: logs_bloom(logs.iter()),
                     transactions_root: calculate_transaction_root(&transactions_envelopes),
@@ -2732,8 +3047,8 @@ impl Backend<FoundryNetwork> {
                     nonce: Default::default(),
                     base_fee_per_gas: Some(block_env.basefee),
                     withdrawals_root: None,
-                    blob_gas_used: None,
-                    excess_blob_gas: None,
+                    blob_gas_used: Some(block_blob_gas_used),
+                    excess_blob_gas: Some(block_env.blob_excess_gas_and_price().map(|b| b.excess_blob_gas).unwrap_or(0)),
                     parent_beacon_block_root: None,
                     requests_hash: None,
                     ..Default::default()
@@ -2767,9 +3082,9 @@ impl Backend<FoundryNetwork> {
                     calls: call_res,
                 };
 
-                // update block env
-                block_env.number += U256::from(1);
-                block_env.timestamp += U256::from(12);
+                // update block env for next iteration
+                block_env.number = U256::from(target_number + 1);
+                block_env.timestamp = U256::from(target_timestamp + 12);
                 block_env.basefee = simulated_block
                     .inner
                     .header
